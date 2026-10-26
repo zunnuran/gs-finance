@@ -11,7 +11,7 @@ Requirements: Node.js 22 or later, npm, and PostgreSQL 17 or later on the deploy
 From the source checkout:
 
 ```powershell
-npm ci
+npm ci --include=dev
 npm run check
 npm test
 npm run build
@@ -21,6 +21,17 @@ npm run release
 The last command prints a new directory under `releases/`. It contains the compiled application, SQL migrations, production configuration template, dependency manifests, and deployment instructions. It excludes `.env`, database contents, uploaded files, the demo-seed script, screenshots, and tests. Each run creates a separate directory and never overwrites an earlier release.
 
 Copy the **contents of that release directory** to a stable server directory, for example `/opt/gss-finance/app` on Linux or `C:\Apps\GSS-Finance` on Windows. Do not copy the entire source checkout or the development `node_modules` directory. The production server does not need TypeScript or Vite to run the compiled release.
+
+If you deploy a Git clone directly on the server instead, run `npm ci --include=dev` and `npm run build` there before starting PM2. The Git repository excludes generated `dist/` files. A prebuilt release already contains those files and skips the build step.
+
+If the build reports **`'vite' is not recognized`** on Windows, or **`vite: not found`** on Linux, the local build tools are missing. From the source directory containing `package.json`, run:
+
+```powershell
+npm ci --include=dev
+npm run build
+```
+
+Build tools are development dependencies. npm may omit them when installed with `--omit=dev`, `--production`, or a shell-level `NODE_ENV=production`. Explicit `--include=dev` installs them even with production omission configured, as documented in [npm's installation options](https://docs.npmjs.com/cli/v10/commands/npm-ci/#include). This does not require changing the application's production configuration or installing Vite globally. Database migrations do not install build tools and do not need to be rerun for this error.
 
 ## 2. Provision the database and environment
 
@@ -34,7 +45,7 @@ CREATE DATABASE gss_finance_production OWNER gss_finance_app;
 
 The `\password` command prompts privately for the database password. The application role needs access to its own database and permission to apply schema migrations. Do not grant access to unrelated databases.
 
-In the deployment directory, install runtime dependencies and copy the template:
+In the prebuilt release directory, install runtime dependencies and copy the template. If you are building from a Git clone, use `npm ci --include=dev` instead:
 
 ```powershell
 npm ci --omit=dev

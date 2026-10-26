@@ -21,7 +21,7 @@ cd gs-finance
 4. Run:
 
 ```powershell
-npm ci
+npm ci --include=dev
 npm run dev
 ```
 
@@ -64,7 +64,17 @@ The production build writes the browser app and server bundle to `dist/`. `npm s
 
 ## Production with PM2
 
-Run `npm ci`, `npm run check`, and `npm run build`, then `npm run release` to create an uploadable production folder without demo scripts, sample documents, local credentials, or uploads. Follow [PM2 deployment](docs/PM2.md) to configure a fresh PostgreSQL database, HTTPS, a strong initial password, and `npm run pm2:start`.
+Run `npm ci --include=dev`, `npm run check`, and `npm run build`, then `npm run release` to create an uploadable production folder without demo scripts, sample documents, local credentials, or uploads. Follow [PM2 deployment](docs/PM2.md) to configure a fresh PostgreSQL database, HTTPS, a strong initial password, and `npm run pm2:start`.
+
+When deploying directly from a Git clone, install build dependencies before building:
+
+```powershell
+npm ci --include=dev
+npm run build
+npm run pm2:start
+```
+
+Vite, esbuild, TypeScript, and tsx are development dependencies needed to build the source. If Windows reports `'vite' is not recognized`, run `npm ci --include=dev` from the folder containing `package.json`, then retry the build. `npm ci --omit=dev` is for an already-built release containing `dist/`; that release does not need a build step. Keep production `.env` settings and HTTPS configured before starting PM2.
 
 A fresh deployment contains only the `admin` user (`gamestrixstudios@gmail.com`); it has no companies or transactions until you create them. Production refuses demo-seeded databases. Existing passwords are preserved during restarts and upgrades. Additional staff can have configurable roles and permissions, but the super-admin identity is fixed.
 
