@@ -1,0 +1,39 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Private configuration (commit placeholder templates only)
+.env
+.env.*
+!.env.example
+!.env.production.example
+.npmrc
+*.pem
+*.key
+
+# Application data, database backups, and deployment artifacts
+uploads/
+uploads-*/
+backups/
+releases/
+.pm2/
+*.dump
+*.backup
+*.sql.gz
+*.pid
+
+# Test output, local screenshots, and logs
+coverage/
+docs/screenshots/
+logs/
+*.log
+
+# Local tools, editor settings, and OS files
+.codex/
+.agents/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
