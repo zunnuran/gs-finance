@@ -151,26 +151,128 @@ async function fixture(t: TestContext) {
     assert.match(app.output(), message);
   }
 
-  async function login(password: string, username = "admin") {
+  async function login(
+    password: string,
+    username = "admin",
+    forwardedProtocol: string | null = "https",
+  ) {
     return fetch(`${base}/api/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-GSS-Request": "1",
-        "X-Forwarded-Proto": "https",
+        ...(forwardedProtocol === null
+          ? {}
+          : { "X-Forwarded-Proto": forwardedProtocol }),
       },
       body: JSON.stringify({ username, password }),
       signal: AbortSignal.timeout(10_000),
     });
   }
 
-  return { schema, control, base, launch, ready, rejected, login };
+  async function sessionCount() {
+    // The session store may create its table lazily on the first saved session.
+    const exists = (
+      await control.query("SELECT to_regclass($1) AS relation", [
+        `${schema}.sessions`,
+      ])
+    ).rows[0].relation;
+    if (!exists) return 0;
+    return Number(
+      (await control.query(`SELECT count(*) FROM ${schema}.sessions`)).rows[0]
+        .count,
+    );
+  }
+
+  return {
+    schema,
+    control,
+    base,
+    launch,
+    ready,
+    rejected,
+    login,
+    sessionCount,
+  };
 }
 
 describe(
   "Production deployment safeguards",
   { skip: !enabled, timeout: 90_000 },
   () => {
+    for (const configuration of [
+      {
+        name: "an untrusted forwarded HTTPS header",
+        trustProxy: "0",
+        forwardedProtocol: "https",
+      },
+      {
+        name: "plain HTTP without a forwarded protocol",
+        trustProxy: "1",
+        forwardedProtocol: null,
+      },
+      {
+        name: "a trusted proxy forwarding HTTP",
+        trustProxy: "1",
+        forwardedProtocol: "http",
+      },
+    ]) {
+      test(`rejects ${configuration.name} before creating a login session`, async (t) => {
+        const f = await fixture(t);
+        const app = f.launch({ TRUST_PROXY: configuration.trustProxy });
+        await f.ready(app);
+        assert.equal(await f.sessionCount(), 0);
+
+        const response = await f.login(
+          initialPassword,
+          "admin",
+          configuration.forwardedProtocol,
+        );
+        assert.equal(response.status, 503);
+        const error = await response.json();
+        assert.equal(error.code, "HTTPS_REQUIRED");
+        assert.match(error.message, /HTTPS/i);
+        assert.equal(response.headers.get("set-cookie"), null);
+        assert.equal(await f.sessionCount(), 0);
+
+        const currentUser = await fetch(`${f.base}/api/auth/user`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        assert.equal(currentUser.status, 401);
+        await currentUser.arrayBuffer();
+      });
+    }
+
+    test("keeps a production login signed in through a trusted TLS proxy", async (t) => {
+      const f = await fixture(t);
+      const app = f.launch({ TRUST_PROXY: "1" });
+      await f.ready(app);
+
+      const response = await f.login(initialPassword);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { success: true });
+      const setCookie = response.headers.get("set-cookie");
+      assert.ok(setCookie);
+      assert.match(setCookie, /^gss\.sid=/);
+      assert.match(setCookie, /; Secure/i);
+      assert.match(setCookie, /; HttpOnly/i);
+      assert.match(setCookie, /; SameSite=Lax/i);
+      assert.equal(await f.sessionCount(), 1);
+
+      const currentUser = await fetch(`${f.base}/api/auth/user`, {
+        headers: {
+          "X-Forwarded-Proto": "https",
+          Cookie: setCookie.split(";")[0],
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      assert.equal(currentUser.status, 200);
+      const user = await currentUser.json();
+      assert.equal(user.username, "admin");
+      assert.equal(user.email, "gamestrixstudios@gmail.com");
+      assert.equal(user.role, "super_admin");
+    });
+
     test("rejects example session secrets before creating any schema tables", async (t) => {
       const f = await fixture(t);
       const app = f.launch({

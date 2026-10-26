@@ -130,7 +130,10 @@ async function api(url: string, method = "GET", body?: any) {
   const result = await response
     .json()
     .catch(() => ({ message: "The server returned an unexpected response" }));
-  if (!response.ok) throw new Error(result.message || "Request failed");
+  if (!response.ok)
+    throw Object.assign(new Error(result.message || "Request failed"), {
+      status: response.status,
+    });
   return result;
 }
 function exportCSV(name: string, rows: Row[]) {
@@ -364,7 +367,7 @@ export default function App() {
     setTimeout(() => setToast(""), 4500);
   };
   const reload = () => setRefresh((v) => v + 1);
-  const initial = useCallback(async () => {
+  const initial = useCallback(async (afterLogin = false) => {
     try {
       const actor = await api("/api/auth/user");
       setUser(actor);
@@ -373,8 +376,20 @@ export default function App() {
         !actor.permissions.includes("dashboard.view")
       )
         setPage("transactions");
-    } catch {
+    } catch (error) {
       setUser(null);
+      if (afterLogin) {
+        if (
+          error instanceof Error &&
+          "status" in error &&
+          error.status === 401 &&
+          error.message === "Please sign in"
+        )
+          throw new Error(
+            "Your sign-in session was not retained. Allow cookies for this site and ask your administrator to check its HTTPS and proxy settings.",
+          );
+        throw error;
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -593,7 +608,7 @@ export default function App() {
         <p>Opening GSS Finance…</p>
       </div>
     );
-  if (!user) return <Login onLogin={initial} />;
+  if (!user) return <Login onLogin={() => initial(true)} />;
   const totalPending = documents.filter((d) => d.status === "submitted").length;
   const filteredDocs = documents.filter(
     (d) =>

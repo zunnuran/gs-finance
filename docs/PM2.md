@@ -96,6 +96,24 @@ Replace the hostname with your own and make ports 80 and 443 reachable for the H
 
 Production sign-in requires HTTPS because session cookies are `Secure`, `HttpOnly`, and `SameSite=Lax`. Do not expose port 5000 directly to the public internet or disable secure cookies to work around a proxy configuration issue.
 
+### Cloudflare Tunnel
+
+When `cloudflared` runs on the same machine as the app, route the public hostname to `http://127.0.0.1:5000` (or your configured `PORT`). In the application's `.env`, set:
+
+```dotenv
+NODE_ENV=production
+HOST=127.0.0.1
+TRUST_PROXY=1
+```
+
+Use the public **HTTPS** URL in the browser. Cloudflare supplies `X-Forwarded-Proto` to identify the visitor's protocol; Express must trust the local proxy to recognize HTTPS and send its Secure session cookie. See [Cloudflare request headers](https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#x-forwarded-proto) and [Express session proxy configuration](https://expressjs.com/en/resources/middleware/session/#cookiesecure).
+
+If login returns to the sign-in screen or reports **Please sign in**, check that `TRUST_PROXY` is `1`, then run `npm run pm2:restart`. This reloads the configuration; no migration or password reset is needed. If PM2 was initially started from a shell exporting `TRUST_PROXY=0`, explicitly update that retained process value too. In PowerShell, run `$env:TRUST_PROXY = '1'` before `npm run pm2:restart`; in Command Prompt, run `set TRUST_PROXY=1` before restarting. Keep the same value in `.env` for future starts.
+
+Keep the origin port private. If the tunnel runs in a different container or machine, restrict the app's listener/firewall to that connector instead of exposing the port publicly. Preserve `X-Forwarded-Proto` through any additional proxy. The API sends `Cache-Control: private, no-store`; make sure any custom Cloudflare cache rule bypasses `/api/*`.
+
+The app now rejects production login when it cannot recognize HTTPS, with **Secure sign-in is unavailable**, rather than reporting success without setting a session cookie. A cookie blocked or lost after login is also shown explicitly.
+
 ## 4. Start and verify
 
 From the deployment directory, using the deployment account:
@@ -153,6 +171,6 @@ PM2 manages this application process; arrange PostgreSQL service startup, HTTPS 
 
 ## Verified release
 
-This release was checked with 44 accounting and source API tests, 22 compiled-production API and safeguard tests, and an actual PM2 start/restart/stop cycle on Windows. The PM2 check used the generated release with only runtime dependencies installed and verified the empty database, sole administrator, email sign-in, Secure session cookie, static assets, and graceful shutdown. The runtime dependency audit reported no known vulnerabilities at packaging time.
+This release was checked with 44 accounting and source API tests, 26 compiled-production API and safeguard tests, and an actual PM2 start/restart/stop cycle on Windows. The PM2 check used the generated release with only runtime dependencies installed and verified the empty database, sole administrator, email sign-in, Secure session cookie, static assets, and graceful shutdown. The runtime dependency audit reported no known vulnerabilities at packaging time.
 
 These checks used isolated test schemas. DNS, HTTPS certificates, and reboot integration must be configured and checked on the destination server.

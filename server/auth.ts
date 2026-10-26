@@ -156,6 +156,10 @@ export function setupAuth(app: Express) {
     ttl: 28800,
   });
   app.set("trust proxy", process.env.TRUST_PROXY === "1" ? 1 : false);
+  app.use("/api", (_req, res, next) => {
+    res.setHeader("Cache-Control", "private, no-store");
+    next();
+  });
   app.use(
     session({
       name: "gss.sid",
@@ -192,6 +196,12 @@ export function setupAuth(app: Express) {
       if (b.n > 20)
         return void res.status(429).json({
           message: "Too many login attempts; try again in 15 minutes",
+        });
+      if (process.env.NODE_ENV === "production" && !req.secure)
+        return void res.status(503).json({
+          code: "HTTPS_REQUIRED",
+          message:
+            "Secure sign-in is unavailable. Open the HTTPS address or ask your administrator to check the proxy configuration.",
         });
       const d = z
         .object({
