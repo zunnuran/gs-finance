@@ -27,15 +27,23 @@ npm run dev
 
 Open [http://localhost:5000](http://localhost:5000), sign in using `admin` or `gamestrixstudios@gmail.com`, and create the first company. The app applies versioned SQL migrations at startup and creates the administrator only when the users table is empty. Changing `ADMIN_PASSWORD` after the first startup does not change an existing user's password.
 
-The initial company has a PKR base currency, a seeded chart of accounts, expense categories, and approval enabled. Create bank/cash accounts, contacts, projects, and additional users before recording transactions. For approval-enabled companies, anyone with `transactions.approve` permission and access to the company can approve a submitted transaction, including its creator. A separate reviewer is not required. Configure this permission on a role or explicitly enable/disable it for a user under Users & permissions. Approval and posting remain separate permissions. Company settings can disable approval when direct finance posting is appropriate.
+The initial company has a PKR base currency, a chart of accounts, and operating expense categories. Create bank/cash accounts, clients, vendors, cash custodians, and additional users before recording transactions.
+
+Transactions use **Pending → Posted**. Saving a transaction creates a Pending record without changing balances; a user with `transactions.post` can post it directly, including their own transaction. There are no submission, approval, or rejection steps. Pending transactions can be edited or cancelled; posted transactions are corrected through reversal. Cancelled and Reversed remain available in transaction history.
+
+Projects, Fixed Assets, People & Advances, and Reconciliation are no longer available as modules or new transaction workflows. Clients & Receivables, Vendors & Payables, Bank & Cash, reports, categories, chart of accounts, users, and audit history remain. Basic cash custodians are managed from Bank & Cash. Existing project, asset, and advance records are retained for historical accounting; integration with another app is not yet implemented.
+
+## Upgrade to the simplified workflow
+
+Back up PostgreSQL before upgrading, build the updated source, and restart the application. Migration `005_simple_transactions.sql` converts existing Draft, Submitted, Approved, and Rejected records to Pending and records the old states in the audit trail. It does not post those transactions or modify existing posted documents/journals. Submit and Approve permissions are removed; existing Post permissions and explicit overrides are preserved. If a former approver should now post transactions, an administrator must explicitly grant `transactions.post`. Removed-module pending records can be cancelled; their posted history can be reversed by authorized users.
 
 ## Restricted users and petty cash
 
-Action permissions and data visibility are separate. In **Users & permissions**, edit a user and select **Data visibility → Own data only**. Grant their company access and link their employee/custodian record for each company. Cash accounts assigned to that employee and advances issued to them will then appear in **My cash** and **My advances**.
+Action permissions and data visibility are separate. In **Users & permissions**, edit a user and select **Data visibility → Own data only**. Grant their company access and link their employee/custodian record for each company. Cash accounts assigned to that custodian appear in **My cash**.
 
-Own-data users can view their permitted submissions and cash/advance transactions involving their assigned employee record. Finance-created funding and advance records are read-only; users can submit separate expense settlements or returns. Their creation, submission, approval, posting, and reversal abilities still depend on the corresponding action permissions. Approval permission never expands an own-data user's visibility or permits approval of someone else's record.
+Own-data users can view their permitted transactions and the cash assigned to their linked custodian record. Finance-created funding records are read-only. They can save their own cash expenses and transfers as Pending; posting and reversal require the corresponding action permission and never expand data visibility.
 
-Company income, bank balances, payroll/private accounts, other employees, customer records, company reports, assets, audit history, reconciliation, and administration are excluded from own-data access. Restricted requests are checked on the server, including guessed transaction/attachment IDs and drafts created before a user's scope changed. Basic vendor and project names remain available for entering expenses, without vendor contact, tax, or bank details. A restricted user's own assigned cash balance includes all movements in that cash account.
+Company income, bank balances, payroll/private accounts, other employees, customer records, company reports, assets, audit history, reconciliation, and administration are excluded from own-data access. Restricted requests are checked on the server, including guessed transaction/attachment IDs and pending records created before a user's scope changed. Basic vendor names remain available for entering expenses, without vendor contact, tax, or bank details. A restricted user's own assigned cash balance includes all movements in that cash account.
 
 The standard **Employee expenses** account is private by default, covering seeded salary and bonus categories. Mark any custom payroll or sensitive account **Private financial account** in the chart of accounts; its transactions and categories will also be hidden. Posted account classifications are checked even if the category is later remapped.
 
@@ -51,7 +59,7 @@ npm run db:migrate
 npm run db:seed-demo
 ```
 
-The optional demo seed adds two separate fictional companies and 43 sample documents. It is atomic and safe to rerun without duplication. See [demo data and verified balances](docs/DEMO-DATA.md) for the sample date range, expected totals, and testing results.
+The optional demo seed adds two separate fictional companies and 13 sample documents using the current workflows. It is atomic and safe to rerun without duplication. See [demo data and verified balances](docs/DEMO-DATA.md) for the sample date range, expected totals, and testing results.
 
 `npm test` runs accounting tests with embedded PostgreSQL through PGlite. Optional HTTP integration tests require an explicit `TEST_DATABASE_URL` pointing to a dedicated real PostgreSQL test database; they skip when it is absent. Each HTTP test run creates and removes its own temporary schema, upload directory, and application process. The configured database user needs permission to create schemas. Never use a production database for tests.
 
@@ -104,13 +112,13 @@ After initial provisioning, use **Change password** for your password and **User
 
 ## Accounting workflow
 
-- Draft and submitted transactions do not affect balances. Posting creates the journal entries; payment and expense recognition use separate documents where needed.
-- Bank withdrawals and account transfers move company assets. Employee cash accounts identify a custodian; employee advances have their own settlement documents.
+- Pending transactions do not affect balances. Posting creates the journal entries; payment and expense recognition use separate documents where needed.
+- Bank withdrawals and account transfers move company assets. Cash accounts identify a custodian.
 - Customer invoices and vendor bills can be settled in parts. Payments are allocated to an outstanding document, and overpayments are rejected.
 - Foreign-currency documents retain their nominal amount and the entered PKR exchange rate. Reports present base-currency totals. Rates are entered manually; no live exchange-rate feed is configured.
 - Foreign bank/cash outflows release their average PKR carrying value and recognize exchange differences. Same-currency transfers preserve carrying value; cross-currency transfers record the actual received amount. Foreign account transactions must be entered chronologically, and later foreign account transactions must be reversed before earlier ones.
-- Asset purchases create asset records. Monthly straight-line depreciation is posted explicitly from the asset workflow; it does not run on a background schedule.
-- Depreciation uses full months starting with the acquisition month, includes any missed months up to the selected date, preserves salvage value, and carries the purchase's project attribution. Each monthly posting can be reversed through the transaction history.
+- Existing asset purchases and depreciation remain in transaction history and financial reports. The app no longer creates asset records or posts depreciation.
+- Existing unpaid asset purchases and capital bills can still be settled through Vendors & Payables. Historical asset records and project associations are preserved.
 - Posted journals are retained. Corrections use reversal and a replacement transaction. Locked periods prevent backdated posting; authorized users manage the lock date.
 - Inter-company transfers post both companies together. Both entities must exist in the same application database, and the acting user needs access to both.
 - Attachments are stored privately in `UPLOAD_DIR` and served through authenticated, company-scoped download routes.
@@ -129,8 +137,8 @@ Business inputs use ordinary action names. `server/accounting.ts` determines jou
 
 ## Verification
 
-The implementation has been checked with TypeScript and the production build, 25 accounting integration tests, and 19 HTTP integration tests against PostgreSQL. The HTTP suite can also run against the compiled production server by setting `TEST_PRODUCTION=1` after building. Tests cover own-data restrictions even with broad permissions, private payroll, assigned cash, attachment access, linked advances, and changes to an existing session's access. Docker packaging is provided but has not been executed in this workstation's environment.
+The implementation has been checked with TypeScript and the production build, 26 accounting integration tests, and 19 HTTP integration tests against PostgreSQL. The HTTP suite can also run against the compiled production server by setting `TEST_PRODUCTION=1` after building. Tests cover own-data restrictions even with broad permissions, private payroll, assigned cash, attachment access, historical records, and changes to an existing session's access. Docker packaging is provided but has not been executed in this workstation's environment.
 
 The browser interface was verified for administrator sign-in, first-company setup, responsive navigation, the dashboard, and business transaction forms. `/health` checks both the application and its PostgreSQL connection.
 
-Production packaging additionally passed 26 compiled-server HTTP and deployment safeguard tests, plus PM2 start/restart/graceful-stop verification against an empty test schema. To repeat the PM2 smoke test, set `TEST_DATABASE_URL` to a dedicated test database and run `node script/test-pm2.mjs <release-directory>` after installing that release's runtime dependencies. On Windows, run this on a host without an existing PM2 daemon; the test refuses to interfere with an existing daemon.
+The current build additionally passed 26 compiled-server HTTP and deployment safeguard tests. Earlier packaging validation covered PM2 start/restart/graceful-stop against an empty test schema; that PM2 check has not been repeated for the simplified workflow. To repeat it, set `TEST_DATABASE_URL` to a dedicated test database and run `node script/test-pm2.mjs <release-directory>` after installing that release's runtime dependencies. On Windows, run this on a host without an existing PM2 daemon; the test refuses to interfere with an existing daemon.

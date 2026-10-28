@@ -17,6 +17,17 @@ export const kinds = [
   "adjustment",
   "depreciation",
 ] as const;
+// Keep historical kinds readable while limiting new financial workflows.
+export const retiredKinds = [
+  "advance",
+  "advance_expense",
+  "advance_return",
+  "asset_purchase",
+  "depreciation",
+] as const;
+export const activeKinds = kinds.filter(
+  (kind) => !(retiredKinds as readonly string[]).includes(kind),
+);
 const money = z
   .string()
   .regex(/^\d+(\.\d{1,2})?$/)

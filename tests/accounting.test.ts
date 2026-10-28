@@ -64,6 +64,135 @@ after(async () => {
   await database.close();
 });
 
+test("workflow migration converts only unposted statuses and preserves ledger history and posting permissions", async () => {
+  const legacy = new PGlite();
+  try {
+    const files = readdirSync("migrations")
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    const migration = files.find((f) => f.startsWith("005_"));
+    assert.ok(migration, "The pending-workflow migration must exist");
+    for (const file of files.filter((f) => f < migration))
+      await legacy.exec(readFileSync(`migrations/${file}`, "utf8"));
+    await legacy.exec(`
+      INSERT INTO roles(id,name,permissions) VALUES(1,'finance','["transactions.view","transactions.submit","transactions.approve","transactions.post"]');
+      INSERT INTO users(id,username,password,full_name,role_id,overrides) VALUES(1,'legacy-admin','fixture-only','Legacy administrator',1,'{"transactions.approve":true,"transactions.submit":false,"transactions.post":false,"reports.view":true}');
+      INSERT INTO companies(id,name,approvals) VALUES(1,'Retained company',true);
+      INSERT INTO accounts(id,company_id,code,name,type,purpose) VALUES(1,1,'101','Bank','asset','bank'),(2,1,'300','Capital','equity','capital');
+      INSERT INTO projects(id,company_id,name) VALUES(1,1,'Retained project');
+      INSERT INTO documents(company_id,kind,date,amount,currency,rate,base_amount,description,status,created_by,project_id)
+        SELECT 1,'receipt','2026-10-01',100,'PKR',1,100,s,s,1,1 FROM unnest(ARRAY['draft','submitted','approved','rejected','posted','cancelled','reversed']) s;
+      BEGIN;
+      INSERT INTO journals(id,company_id,document_id,date) SELECT id,1,id,'2026-10-01' FROM documents WHERE status IN ('posted','reversed');
+      INSERT INTO journal_lines(journal_id,company_id,account_id,debit,credit,foreign_amount,currency)
+        SELECT id,1,1,100,0,100,'PKR' FROM journals UNION ALL SELECT id,1,2,0,100,-100,'PKR' FROM journals;
+      COMMIT;
+    `);
+    const postedBefore = (
+      await legacy.query(
+        "SELECT * FROM documents WHERE status IN ('posted','reversed') ORDER BY id",
+      )
+    ).rows;
+    const journalBefore = (
+      await legacy.query("SELECT * FROM journals ORDER BY id")
+    ).rows;
+    const linesBefore = (
+      await legacy.query("SELECT * FROM journal_lines ORDER BY id")
+    ).rows;
+    await legacy.exec(readFileSync(`migrations/${migration}`, "utf8"));
+    const docs = (
+      await legacy.query<{
+        description: string;
+        status: string;
+        project_id: number;
+      }>("SELECT description,status,project_id FROM documents ORDER BY id")
+    ).rows;
+    for (const doc of docs) {
+      assert.equal(
+        doc.status,
+        ["draft", "submitted", "approved", "rejected"].includes(doc.description)
+          ? "pending"
+          : doc.description,
+      );
+      assert.equal(
+        doc.project_id,
+        1,
+        "Retiring Projects must preserve historical links",
+      );
+    }
+    assert.deepEqual(
+      (
+        await legacy.query(
+          "SELECT * FROM documents WHERE status IN ('posted','reversed') ORDER BY id",
+        )
+      ).rows,
+      postedBefore,
+    );
+    assert.deepEqual(
+      (await legacy.query("SELECT * FROM journals ORDER BY id")).rows,
+      journalBefore,
+    );
+    assert.deepEqual(
+      (await legacy.query("SELECT * FROM journal_lines ORDER BY id")).rows,
+      linesBefore,
+    );
+    assert.equal(
+      (
+        await legacy.query<{ approvals: boolean }>(
+          "SELECT approvals FROM companies WHERE id=1",
+        )
+      ).rows[0].approvals,
+      false,
+    );
+    const role = (
+      await legacy.query<{ permissions: string[] }>(
+        "SELECT permissions FROM roles WHERE id=1",
+      )
+    ).rows[0];
+    assert.deepEqual(
+      role.permissions.filter((p) => p.startsWith("transactions.")).sort(),
+      ["transactions.post", "transactions.view"],
+    );
+    const user = (
+      await legacy.query<{ overrides: Record<string, boolean> }>(
+        "SELECT overrides FROM users WHERE id=1",
+      )
+    ).rows[0];
+    assert.deepEqual(user.overrides, {
+      "transactions.post": false,
+      "reports.view": true,
+    });
+    const auditRows = (
+      await legacy.query<{
+        before_value: { status: string };
+        after_value: { status: string };
+      }>(
+        "SELECT before_value,after_value FROM audit WHERE action='workflow_migration' ORDER BY entity_id",
+      )
+    ).rows;
+    assert.deepEqual(
+      auditRows.map((row) => row.before_value.status),
+      ["draft", "submitted", "approved", "rejected"],
+    );
+    assert.ok(auditRows.every((row) => row.after_value.status === "pending"));
+    const fresh = (
+      await legacy.query<{ status: string }>(
+        "INSERT INTO documents(company_id,kind,date,amount,currency,rate,base_amount,description,created_by) VALUES(1,'expense','2026-10-02',10,'PKR',1,10,'New pending',1) RETURNING status",
+      )
+    ).rows[0];
+    assert.equal(fresh.status, "pending");
+    await assert.rejects(
+      () =>
+        legacy.query(
+          "UPDATE documents SET status='approved' WHERE description='draft'",
+        ),
+      /check|constraint/i,
+    );
+  } finally {
+    await legacy.close();
+  }
+});
+
 async function fixture(name: string) {
   const company = await tx((c) => createCompany(c, userId, name));
   await connection.query("UPDATE companies SET approvals=false WHERE id=$1", [
@@ -152,6 +281,36 @@ async function fixture(name: string) {
   };
 }
 
+// Create retained pre-removal history as a fixture, never through a retired API.
+async function historicalPosting(
+  f: Awaited<ReturnType<typeof fixture>>,
+  kind: string,
+  debit: number,
+  credit: number,
+  amount: string,
+  contactId: number | null = null,
+) {
+  return tx(async (c) => {
+    const doc = (
+      await c.query(
+        "INSERT INTO documents(company_id,kind,date,amount,currency,rate,base_amount,description,status,created_by,contact_id,extra) VALUES($1,$2,'2026-10-01',$3,'PKR',1,$3,'Historical module fixture','posted',$4,$5,'{}') RETURNING *",
+        [f.company.id, kind, amount, userId, contactId],
+      )
+    ).rows[0];
+    const journal = (
+      await c.query(
+        "INSERT INTO journals(company_id,document_id,date) VALUES($1,$2,$3) RETURNING id",
+        [f.company.id, doc.id, doc.date],
+      )
+    ).rows[0].id;
+    await c.query(
+      "INSERT INTO journal_lines(journal_id,company_id,account_id,debit,credit,foreign_amount,currency,contact_id) VALUES($1,$2,$3,$5,0,$5,'PKR',$6),($1,$2,$4,0,$5,-$5,'PKR',$6)",
+      [journal, f.company.id, debit, credit, amount, contactId],
+    );
+    return doc;
+  });
+}
+
 test("cash custody, transfers and expenses preserve double entry without recognizing transfer income", async () => {
   const f = await fixture("Cash custody");
   await f.post({
@@ -197,54 +356,49 @@ test("cash custody, transfers and expenses preserve double entry without recogni
   );
 });
 
-test("advances settle through eligible expenses and returned cash without duplicate expense recognition", async () => {
-  const f = await fixture("Advances");
-  await f.post({
-    kind: "receipt",
-    amount: "100000",
-    targetId: f.bank,
-    headId: f.system.capital,
-  });
-  const advance = await f.post({
-    kind: "advance",
-    amount: "50000",
-    sourceId: f.bank,
-    contactId: f.employee,
-  });
-  await f.post({
-    kind: "advance_expense",
-    amount: "35000",
-    relatedId: advance.id,
-    contactId: f.employee,
-    headId: f.system.office,
-  });
-  await f.expectBalance(f.system.advance, "15000");
-  await f.post({
-    kind: "advance_return",
-    amount: "15000",
-    relatedId: advance.id,
-    contactId: f.employee,
-    targetId: f.bank,
-  });
-  await f.expectBalance(f.system.advance, "0");
-  await f.expectBalance(f.system.office, "35000");
-  await f.expectBalance(f.bank, "65000");
-  const excess = await f.draft({
-    kind: "advance_return",
-    amount: "0.01",
-    relatedId: advance.id,
-    contactId: f.employee,
-    targetId: f.bank,
-  });
+test("retired advance and asset actions cannot create new documents or post retained pending records", async () => {
+  const f = await fixture("Retired modules");
+  const before = (
+    await connection.query(
+      "SELECT count(*)::int n FROM documents WHERE company_id=$1",
+      [f.company.id],
+    )
+  ).rows[0].n;
+  for (const kind of [
+    "advance",
+    "advance_expense",
+    "advance_return",
+    "asset_purchase",
+    "depreciation",
+  ])
+    await assert.rejects(
+      () => f.draft({ kind, sourceId: f.bank, contactId: f.employee }),
+      /unavailable|removed|retired|supported/i,
+    );
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM documents WHERE company_id=$1",
+        [f.company.id],
+      )
+    ).rows[0].n,
+    before,
+  );
+  const old = (
+    await connection.query(
+      "INSERT INTO documents(company_id,kind,date,amount,currency,rate,base_amount,description,status,created_by,source_id,contact_id) VALUES($1,'advance','2026-10-01',100,'PKR',1,100,'Historical pending advance','pending',$2,$3,$4) RETURNING id",
+      [f.company.id, userId, f.bank, f.employee],
+    )
+  ).rows[0];
   await assert.rejects(
-    () => tx((c) => postDocument(c, f.company.id, userId, excess.id)),
-    /outstanding/i,
+    () => tx((c) => postDocument(c, f.company.id, userId, old.id)),
+    /unavailable|removed|retired|supported/i,
   );
   assert.equal(
     (
       await connection.query(
         "SELECT count(*)::int n FROM journals WHERE document_id=$1",
-        [excess.id],
+        [old.id],
       )
     ).rows[0].n,
     0,
@@ -324,28 +478,29 @@ test("vendor bill recognizes expense once and partial payments clear the payable
   await f.expectBalance(f.bank, "100000");
 });
 
-test("asset purchases create a fixed asset and unpaid acquisition can be settled", async () => {
-  const f = await fixture("Assets");
-  const asset = await f.post({
-    kind: "asset_purchase",
-    amount: "300000",
-    contactId: f.vendor,
-    assetName: "Workstation",
-    usefulLife: 36,
-    salvage: "12000",
-  });
+test("historical asset acquisitions remain in reports and their unpaid balance can still be settled", async () => {
+  const f = await fixture("Retained assets");
+  const asset = await historicalPosting(
+    f,
+    "asset_purchase",
+    f.system.fixed_asset,
+    f.system.payable,
+    "300000",
+    f.vendor,
+  );
+  await connection.query(
+    "INSERT INTO assets(company_id,document_id,name,cost,salvage,useful_life,acquired) VALUES($1,$2,'Legacy workstation',300000,12000,36,'2026-10-01')",
+    [f.company.id, asset.id],
+  );
   await f.expectBalance(f.system.fixed_asset, "300000");
   await f.expectBalance(f.system.payable, "-300000");
-  const record = (
-    await connection.query("SELECT * FROM assets WHERE document_id=$1", [
-      asset.id,
-    ])
-  ).rows[0];
-  assert.equal(record.name, "Workstation");
-  assert.equal(Number(record.cost), 300000);
-  assert.equal(record.useful_life, 36);
-  const r = await reports(connection, f.company.id, "2026-10-01", "2026-10-31");
-  assert.equal(r.summary.expenses, "0.00");
+  const report = await reports(
+    connection,
+    f.company.id,
+    "2026-10-01",
+    "2026-10-31",
+  );
+  assert.equal(report.summary.expenses, "0.00");
   await f.post({
     kind: "receipt",
     amount: "300000",
@@ -360,6 +515,15 @@ test("asset purchases create a fixed asset and unpaid acquisition can be settled
     relatedId: asset.id,
   });
   await f.expectBalance(f.system.payable, "0");
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM assets WHERE document_id=$1",
+        [asset.id],
+      )
+    ).rows[0].n,
+    1,
+  );
 });
 
 test("inter-company transfers create balanced linked ledgers and reverse both atomically", async () => {
@@ -436,7 +600,7 @@ test("duplicate posting is idempotent and reversal preserves original lines", as
   );
 });
 
-test("period locks, approvals and account ownership reject posting without partial ledger writes", async () => {
+test("pending records stay unposted and period locks and account ownership prevent partial ledger writes", async () => {
   const f = await fixture("Controls"),
     other = await fixture("Other company");
   const d = await f.draft({
@@ -444,16 +608,8 @@ test("period locks, approvals and account ownership reject posting without parti
     targetId: f.bank,
     headId: f.system.revenue,
   });
-  await connection.query("UPDATE companies SET approvals=true WHERE id=$1", [
-    f.company.id,
-  ]);
-  await assert.rejects(
-    () => tx((c) => postDocument(c, f.company.id, userId, d.id)),
-    /approval/i,
-  );
-  await connection.query("UPDATE documents SET status='approved' WHERE id=$1", [
-    d.id,
-  ]);
+  assert.equal(d.status, "pending");
+  await f.expectBalance(f.bank, "0");
   await connection.query(
     "UPDATE companies SET locked_through='2026-10-10' WHERE id=$1",
     [f.company.id],
@@ -890,47 +1046,89 @@ test("backdated foreign receipts cannot alter the carrying basis of later accoun
   await f.expectBalance(f.usd, "14000");
 });
 
-test("capital vendor bills require asset metadata and create an asset once supplied", async () => {
-  const f = await fixture("Capital vendor bill");
-  const missing = await f.draft({
-    kind: "bill",
-    amount: "300000",
-    contactId: f.vendor,
-    headId: f.system.fixed_asset,
-  });
+test("new capital bills and project links are rejected while retained capital liabilities remain payable", async () => {
+  const f = await fixture("Retired capital bills");
+  const capitalCategory = (
+    await connection.query(
+      "INSERT INTO categories(company_id,name,account_id) VALUES($1,'Retained capital category',$2) RETURNING id",
+      [f.company.id, f.system.fixed_asset],
+    )
+  ).rows[0].id;
+  for (const headId of [undefined, f.system.office]) {
+    await assert.rejects(
+      () =>
+        f.draft({
+          kind: "bill",
+          contactId: f.vendor,
+          categoryId: capitalCategory,
+          headId,
+        }),
+      /fixed asset|capital/i,
+      "A capital category takes precedence over an absent or operating expense head",
+    );
+    const retained = (
+      await connection.query(
+        "INSERT INTO documents(company_id,kind,date,amount,currency,rate,base_amount,description,created_by,contact_id,category_id,head_id) VALUES($1,'bill','2026-10-01',100,'PKR',1,100,'Retained category-only capital bill',$2,$3,$4,$5) RETURNING id",
+        [f.company.id, userId, f.vendor, capitalCategory, headId ?? null],
+      )
+    ).rows[0];
+    await assert.rejects(
+      () => tx((c) => postDocument(c, f.company.id, userId, retained.id)),
+      /fixed asset|capital/i,
+    );
+    assert.equal(
+      (
+        await connection.query(
+          "SELECT count(*) FROM journals WHERE document_id=$1",
+          [retained.id],
+        )
+      ).rows[0].count,
+      0,
+    );
+  }
   await assert.rejects(
-    () => tx((c) => postDocument(c, f.company.id, userId, missing.id)),
-    /asset name|useful life|salvage/i,
+    () =>
+      f.draft({
+        kind: "bill",
+        amount: "300000",
+        contactId: f.vendor,
+        headId: f.system.fixed_asset,
+        assetName: "New asset",
+        usefulLife: 36,
+      }),
+    /unavailable|removed|retired|supported|capital|fixed assets/i,
   );
-  assert.equal(
-    (
-      await connection.query(
-        "SELECT count(*)::int n FROM journals WHERE document_id=$1",
-        [missing.id],
-      )
-    ).rows[0].n,
-    0,
+  await assert.rejects(
+    () =>
+      f.draft({
+        kind: "bill",
+        contactId: f.vendor,
+        headId: f.system.fixed_asset,
+      }),
+    /fixed asset|capital/i,
   );
-  const capitalBill = await f.post({
-    kind: "bill",
-    amount: "300000",
-    contactId: f.vendor,
-    headId: f.system.fixed_asset,
-    assetName: "Render workstation",
-    usefulLife: 36,
-    salvage: "0",
-  });
-  assert.equal(
-    (
-      await connection.query(
-        "SELECT count(*)::int n FROM assets WHERE document_id=$1",
-        [capitalBill.id],
-      )
-    ).rows[0].n,
-    1,
+  await assert.rejects(
+    () =>
+      f.draft({
+        kind: "expense",
+        sourceId: f.bank,
+        headId: f.system.office,
+        projectId: 999,
+      }),
+    /project/i,
   );
-  await f.expectBalance(f.system.fixed_asset, "300000");
-  await f.expectBalance(f.system.payable, "-300000");
+  const bill = await historicalPosting(
+    f,
+    "bill",
+    f.system.fixed_asset,
+    f.system.payable,
+    "300000",
+    f.vendor,
+  );
+  await connection.query(
+    "INSERT INTO assets(company_id,document_id,name,cost,salvage,useful_life,acquired) VALUES($1,$2,'Legacy capital bill',300000,0,36,'2026-10-01')",
+    [f.company.id, bill.id],
+  );
   await f.post({
     kind: "receipt",
     amount: "300000",
@@ -942,11 +1140,16 @@ test("capital vendor bills require asset metadata and create an asset once suppl
     amount: "300000",
     contactId: f.vendor,
     sourceId: f.bank,
-    relatedId: capitalBill.id,
+    relatedId: bill.id,
   });
-  const r = await reports(connection, f.company.id, "2026-10-01", "2026-10-31");
+  const report = await reports(
+    connection,
+    f.company.id,
+    "2026-10-01",
+    "2026-10-31",
+  );
   assert.equal(
-    r.cashFlow.find((row: any) => row.name === "Investing")?.balance,
+    report.cashFlow.find((row: any) => row.name === "Investing")?.balance,
     "-300000.00",
   );
 });

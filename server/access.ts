@@ -112,12 +112,6 @@ export async function ownBootstrap(
       [company, context.contacts],
     )
   ).rows;
-  const projects = (
-    await c.query(
-      "SELECT id,company_id,name,active FROM projects WHERE company_id=$1",
-      [company],
-    )
-  ).rows;
   return {
     company: (await c.query("SELECT * FROM companies WHERE id=$1", [company]))
       .rows[0],
@@ -126,7 +120,7 @@ export async function ownBootstrap(
       parent_id: null,
     })),
     contacts,
-    projects,
+    projects: [],
     categories: categories.map((cat) => ({
       ...cat,
       parent_id: categoryIds.has(cat.parent_id) ? cat.parent_id : null,
@@ -156,16 +150,7 @@ export async function assertOwnInput(
   d: Partial<DocumentInput>,
 ) {
   if (actor.dataScope !== "own") return;
-  if (
-    ![
-      "expense",
-      "advance",
-      "advance_expense",
-      "advance_return",
-      "transfer",
-    ].includes(d.kind || "") ||
-    d.otherCompanyId
-  )
+  if (!["expense", "transfer"].includes(d.kind || "") || d.otherCompanyId)
     denyScope();
   const data = await ownBootstrap(c, actor, company);
   const cash = new Set(
@@ -174,39 +159,18 @@ export async function assertOwnInput(
   const head = new Set(
     data.accounts.filter((a) => a.type === "expense").map((a) => a.id),
   );
-  const ownEmployees = new Set(
-    data.contacts.filter((c) => c.kind === "employee").map((c) => c.id),
-  );
   if (d.sourceId && !cash.has(d.sourceId)) denyScope();
   if (d.targetId && !cash.has(d.targetId)) denyScope();
   if (d.headId && !head.has(d.headId)) denyScope();
   if (d.categoryId && !data.categories.some((cat) => cat.id === d.categoryId))
     denyScope();
-  if (d.projectId && !data.projects.some((p) => p.id === d.projectId))
-    denyScope();
+  if (d.projectId) denyScope();
   if (d.contactId && !data.contacts.some((ct) => ct.id === d.contactId))
-    denyScope();
-  if (
-    ["advance", "advance_expense", "advance_return"].includes(d.kind || "") &&
-    !ownEmployees.has(d.contactId)
-  )
     denyScope();
   if (d.kind === "expense" && !cash.has(d.sourceId)) denyScope();
   if (d.kind === "transfer" && (!cash.has(d.sourceId) || !cash.has(d.targetId)))
     denyScope();
-  if (d.kind === "advance_return" && !cash.has(d.targetId)) denyScope();
-  if (d.relatedId) {
-    await assertOwnDocument(c, actor, company, d.relatedId);
-    const related = (
-      await c.query("SELECT * FROM documents WHERE id=$1", [d.relatedId])
-    ).rows[0];
-    if (
-      related.kind !== "advance" ||
-      !ownEmployees.has(related.contact_id) ||
-      related.contact_id !== d.contactId
-    )
-      denyScope();
-  }
+  if (d.relatedId) denyScope();
 }
 
 export function documentInput(d: any): Partial<DocumentInput> {

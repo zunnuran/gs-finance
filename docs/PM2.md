@@ -171,6 +171,8 @@ PM2 manages this application process; arrange PostgreSQL service startup, HTTPS 
 
 ## Verified release
 
-This release was checked with 44 accounting and source API tests, 26 compiled-production API and safeguard tests, and an actual PM2 start/restart/stop cycle on Windows. The PM2 check used the generated release with only runtime dependencies installed and verified the empty database, sole administrator, email sign-in, Secure session cookie, static assets, and graceful shutdown. The runtime dependency audit reported no known vulnerabilities at packaging time.
+The current simplified-workflow build passed 45 accounting and source API tests and 26 compiled-production API and safeguard tests.
+
+Earlier packaging validation included an actual PM2 start/restart/stop cycle on Windows. It used the generated release with only runtime dependencies installed and verified the empty database, sole administrator, email sign-in, Secure session cookie, static assets, and graceful shutdown. The runtime dependency audit reported no known vulnerabilities at that packaging time. Packaging, PM2 lifecycle, and dependency-audit checks have not been repeated for the simplified workflow.
 
 These checks used isolated test schemas. DNS, HTTPS certificates, and reboot integration must be configured and checked on the destination server.

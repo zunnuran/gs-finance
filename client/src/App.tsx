@@ -18,7 +18,6 @@ import {
   CreditCard,
   Download,
   FileText,
-  FolderKanban,
   Landmark,
   LayoutDashboard,
   LogOut,
@@ -33,7 +32,6 @@ import {
   Check,
   Clock,
   CircleAlert,
-  Package,
   Receipt,
   History,
   Paperclip,
@@ -55,14 +53,12 @@ type Data = {
   company: Row;
   accounts: Row[];
   contacts: Row[];
-  projects: Row[];
   categories: Row[];
 };
 const emptyData: Data = {
   company: {},
   accounts: [],
   contacts: [],
-  projects: [],
   categories: [],
 };
 const today = () =>
@@ -111,6 +107,17 @@ const kindLabels: Record<string, string> = {
   adjustment: "Accounting adjustment",
   depreciation: "Depreciation",
 };
+const retiredKinds = new Set([
+  "advance",
+  "advance_expense",
+  "advance_return",
+  "asset_purchase",
+  "depreciation",
+]);
+const activeKindLabels = Object.entries(kindLabels).filter(
+  ([kind]) => !retiredKinds.has(kind),
+);
+
 async function api(url: string, method = "GET", body?: any) {
   const response = await fetch(url, {
     method,
@@ -355,7 +362,6 @@ export default function App() {
     [mobile, setMobile] = useState(false),
     [from, setFrom] = useState(today().slice(0, 7) + "-01"),
     [to, setTo] = useState(today()),
-    [project, setProject] = useState(""),
     [modal, setModal] = useState<Row | null>(null),
     [selected, setSelected] = useState<Row | null>(null),
     [refresh, setRefresh] = useState(0);
@@ -398,7 +404,7 @@ export default function App() {
     void initial();
   }, [initial]);
   useEffect(() => {
-    if (ownData && !["transactions", "accounts", "advances"].includes(page)) {
+    if (ownData && !["transactions", "accounts"].includes(page)) {
       setPage("transactions");
       setModal(null);
       setSelected(null);
@@ -428,7 +434,6 @@ export default function App() {
   }, [user, refresh]);
   const selectCompany = (id: number) => {
     setCompany(id);
-    setProject("");
     setSelected(null);
     try {
       localStorage.setItem(`gss-finance-company-${user!.id}`, String(id));
@@ -450,9 +455,7 @@ export default function App() {
             cashPosition: cash,
           }))
         : can("reports.view") || can("dashboard.view")
-          ? api(
-              `${base}/reports?from=${from}&to=${to}${project ? "&project=" + project : ""}`,
-            )
+          ? api(`${base}/reports?from=${from}&to=${to}`)
           : Promise.resolve(null),
     ])
       .then(([master, docs, rep]) => {
@@ -471,7 +474,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [company, user, refresh, from, to, project]);
+  }, [company, user, refresh, from, to]);
   const changePage = (next: string) => {
     setPage(next);
     setQuery("");
@@ -505,21 +508,12 @@ export default function App() {
           "transactions.view",
         ],
         ["payables", "Vendors & payables", ArrowUpRight, "transactions.view"],
-        [
-          "advances",
-          ownData ? "My advances" : "People & advances",
-          Users,
-          "transactions.view",
-        ],
-        ["projects", "Projects", FolderKanban, "transactions.view"],
-        ["assets", "Fixed assets", Package, "transactions.view"],
       ],
     },
     {
       label: "FINANCE",
       items: [
         ["reports", "Reports", ChartNoAxesCombined, "reports.view"],
-        ["reconciliation", "Reconciliation", ShieldCheck, "accounting.manage"],
         ["categories", "Categories", Receipt, "masters.manage"],
         ["chart", "Chart of accounts", FileText, "accounting.manage"],
         ["audit", "Audit trail", History, "audit.view"],
@@ -537,8 +531,7 @@ export default function App() {
       ...group,
       items: group.items.filter(
         ([key]) =>
-          !ownData ||
-          ["transactions", "accounts", "advances"].includes(key as string),
+          !ownData || ["transactions", "accounts"].includes(key as string),
       ),
     }))
     .filter((group) => group.items.length > 0);
@@ -567,24 +560,9 @@ export default function App() {
       "Vendors & payables",
       "Keep supplier bills and payments organized.",
     ],
-    advances: [
-      ownData ? "My advances" : "People & advances",
-      ownData
-        ? "Track advances issued to you and record their settlement."
-        : "Know who holds company funds and what is outstanding.",
-    ],
-    projects: [
-      "Projects",
-      "Connect your financial activity to the work behind it.",
-    ],
-    assets: ["Fixed assets", "Manage purchases and monthly depreciation."],
     reports: [
       "Financial reports",
       "Explore your company’s performance and accounting records.",
-    ],
-    reconciliation: [
-      "Bank reconciliation",
-      "Match recorded transactions to your bank statement.",
     ],
     categories: [
       "Expense categories",
@@ -598,7 +576,7 @@ export default function App() {
     admin: ["Users & permissions", "Give your team the access they need."],
     settings: [
       "Company settings",
-      "Configure approval workflows and accounting periods.",
+      "Manage company details and accounting periods.",
     ],
   };
   if (authLoading)
@@ -609,7 +587,7 @@ export default function App() {
       </div>
     );
   if (!user) return <Login onLogin={() => initial(true)} />;
-  const totalPending = documents.filter((d) => d.status === "submitted").length;
+  const totalPending = documents.filter((d) => d.status === "pending").length;
   const filteredDocs = documents.filter(
     (d) =>
       !query ||
@@ -834,18 +812,6 @@ export default function App() {
                       onChange={(e) => setTo(e.target.value)}
                     />
                   </div>
-                  <select
-                    aria-label="Project filter"
-                    value={project}
-                    onChange={(e) => setProject(e.target.value)}
-                  >
-                    <option value="">All projects</option>
-                    {data.projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
                   <span className="filter-note">
                     Balances as of {dateLabel(to)}
                   </span>
@@ -855,10 +821,7 @@ export default function App() {
                 <Dashboard
                   report={report}
                   documents={documents.filter(
-                    (d) =>
-                      d.date >= from &&
-                      d.date <= to &&
-                      (!project || d.project_id === Number(project)),
+                    (d) => d.date >= from && d.date <= to,
                   )}
                   data={data}
                   can={can}
@@ -879,9 +842,7 @@ export default function App() {
                   onNew={openTransaction}
                 />
               )}
-              {["accounts", "chart", "projects", "categories"].includes(
-                page,
-              ) && (
+              {["accounts", "chart", "categories"].includes(page) && (
                 <MasterPage
                   page={page}
                   ownData={ownData}
@@ -893,7 +854,7 @@ export default function App() {
                   }
                 />
               )}
-              {["receivables", "payables", "advances"].includes(page) && (
+              {["receivables", "payables"].includes(page) && (
                 <PeoplePage
                   page={page}
                   ownData={ownData}
@@ -907,31 +868,12 @@ export default function App() {
                   onSelect={setSelected}
                 />
               )}
-              {page === "assets" && (
-                <Assets
-                  base={base}
-                  refresh={refresh}
-                  can={can}
-                  notify={notify}
-                  reload={reload}
-                  onNew={() => openTransaction("asset_purchase")}
-                />
-              )}
               {page === "reports" && (
                 <Reports
                   report={report}
                   documents={documents}
                   data={data}
                   to={to}
-                />
-              )}
-              {page === "reconciliation" && (
-                <Reconciliation
-                  base={base}
-                  data={data}
-                  notify={notify}
-                  reload={reload}
-                  refresh={refresh}
                 />
               )}
               {page === "audit" && <Audit base={base} refresh={refresh} />}
@@ -1025,7 +967,7 @@ export default function App() {
             closeModal();
             reload();
             setSelected(doc);
-            notify("Transaction saved as draft");
+            notify("Transaction saved as pending");
           }}
         />
       )}
@@ -1056,7 +998,6 @@ export default function App() {
                 targetId: d.target_id,
                 headId: d.head_id,
                 contactId: d.contact_id,
-                projectId: d.project_id,
                 categoryId: d.category_id,
                 relatedId: d.related_id,
                 otherCompanyId: d.other_company_id,
@@ -1074,7 +1015,7 @@ export default function App() {
             notify(
               action === "post"
                 ? "Transaction posted"
-                : `Transaction ${action === "reverse" ? "reversed" : action === "submit" ? "submitted" : action === "approve" ? "approved" : action === "reject" ? "rejected" : "cancelled"}`,
+                : `Transaction ${action === "reverse" ? "reversed" : "cancelled"}`,
             );
             reload();
             setSelected(null);
@@ -1089,7 +1030,6 @@ export default function App() {
               amount: String(
                 Number(selected.amount) - Number(selected.allocated || 0),
               ),
-              projectId: selected.project_id,
             });
           }}
         />
@@ -1148,7 +1088,7 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
         <div className="login-form">
           <div className="eyebrow">WELCOME BACK</div>
           <h2>Sign in to your workspace</h2>
-          <p>Keep your team, accounts, and projects connected.</p>
+          <p>Keep your accounts and business finances connected.</p>
           <form
             onSubmit={async (e) => {
               e.preventDefault();
@@ -1265,7 +1205,7 @@ function Dashboard({
   to: string;
 }) {
   const s = report?.summary || {},
-    pending = documents.filter((d) => d.status === "submitted");
+    pending = documents.filter((d) => d.status === "pending");
   const metrics = [
     ["Total bank balance", s.bank, Landmark, "Across company bank accounts"],
     ["Cash with custodians", s.cash, Wallet, "Company funds held in cash"],
@@ -1431,12 +1371,6 @@ function Dashboard({
               "Move funds between accounts",
               ArrowLeftRight,
             ],
-            [
-              "advance",
-              "Issue an advance",
-              "Track money given to your team",
-              Users,
-            ],
           ].map(([kind, label, sub, Icon]) => {
             const I = Icon as typeof Users;
             return (
@@ -1466,8 +1400,8 @@ function Dashboard({
               <Clock size={18} />
             </span>
             <div>
-              <strong>{pending.length} pending approval</strong>
-              <small>Review submitted transactions</small>
+              <strong>{pending.length} pending</strong>
+              <small>Ready to review and post</small>
             </div>
             <button
               className="icon-button"
@@ -1550,10 +1484,6 @@ function Dashboard({
               text="Posted expenses will appear in this breakdown."
             />
           )}
-          <div className="card-footnote">
-            <span>Outstanding advances</span>
-            <strong>{money(s.advances)}</strong>
-          </div>
         </section>
       </div>
     </>
@@ -1659,7 +1589,7 @@ function Transactions({
   can: (p: string) => boolean;
   onNew: (k?: string) => void;
 }) {
-  const [status, setStatus] = useState("all"),
+  const [status, setStatus] = useState("pending"),
     [kind, setKind] = useState("");
   const filtered = rows.filter(
     (d) =>
@@ -1668,24 +1598,18 @@ function Transactions({
   return (
     <section className="card">
       <div className="tabs">
-        {["all", "draft", "submitted", "approved", "posted", "reversed"].map(
-          (s) => (
-            <button
-              key={s}
-              className={status === s ? "active" : ""}
-              onClick={() => setStatus(s)}
-            >
-              {s === "all"
-                ? "All transactions"
-                : s === "submitted"
-                  ? "Pending approval"
-                  : title(s)}
-              <span>
-                {rows.filter((d) => s === "all" || d.status === s).length}
-              </span>
-            </button>
-          ),
-        )}
+        {["pending", "posted", "all"].map((s) => (
+          <button
+            key={s}
+            className={status === s ? "active" : ""}
+            onClick={() => setStatus(s)}
+          >
+            {s === "all" ? "All history" : title(s)}
+            <span>
+              {rows.filter((d) => s === "all" || d.status === s).length}
+            </span>
+          </button>
+        ))}
       </div>
       <div className="table-toolbar">
         <div className="search-input">
@@ -1693,7 +1617,7 @@ function Transactions({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search transactions, references, people…"
+            placeholder="Search transactions, references, contacts…"
           />
         </div>
         <select
@@ -1702,7 +1626,7 @@ function Transactions({
           onChange={(e) => setKind(e.target.value)}
         >
           <option value="">All transaction types</option>
-          {Object.entries(kindLabels).map(([k, v]) => (
+          {activeKindLabels.map(([k, v]) => (
             <option key={k} value={k}>
               {v}
             </option>
@@ -1717,7 +1641,30 @@ function Transactions({
           Export
         </button>
       </div>
-      <TransactionTable rows={filtered} onSelect={onSelect} />
+      {filtered.length ? (
+        <TransactionTable rows={filtered} onSelect={onSelect} />
+      ) : (
+        <Empty
+          title={
+            query || kind
+              ? "No matching transactions"
+              : status === "pending"
+                ? "No pending transactions"
+                : status === "posted"
+                  ? "No posted transactions"
+                  : "No transactions yet"
+          }
+          text={
+            query || kind
+              ? "Try a different search or transaction type."
+              : status === "pending"
+                ? "New transactions appear here until they are posted."
+                : status === "posted"
+                  ? "Post a pending transaction to include it in account balances."
+                  : "Record your first business action to start building your financial history."
+          }
+        />
+      )}
       <div className="table-bottom">
         Showing {filtered.length} transaction{filtered.length !== 1 ? "s" : ""}
       </div>
@@ -1756,7 +1703,7 @@ function MasterPage({
     .sort((a, b) => (table === "categories" ? a.position - b.position : 0));
   return (
     <section className="card">
-      <div className="card-heading">
+      <div className="card-heading master-heading">
         <div>
           <h2>
             {page === "chart"
@@ -1770,25 +1717,32 @@ function MasterPage({
           </p>
         </div>
         {can("masters.manage") && (
-          <button
-            className="button compact"
-            onClick={() =>
-              onEdit(
-                table,
-                page === "accounts"
-                  ? { purpose: "bank", type: "asset" }
-                  : undefined,
-              )
-            }
-          >
-            <Plus size={16} />
-            Add{" "}
-            {page === "accounts" || page === "chart"
-              ? "account"
-              : page === "projects"
-                ? "project"
-                : "category"}
-          </button>
+          <div className="card-actions">
+            {page === "accounts" && (
+              <button
+                className="button secondary compact"
+                onClick={() => onEdit("contacts", { kind: "employee" })}
+              >
+                <Plus size={16} />
+                Add cash custodian
+              </button>
+            )}
+            <button
+              className="button compact"
+              onClick={() =>
+                onEdit(
+                  table,
+                  page === "accounts"
+                    ? { purpose: "bank", type: "asset" }
+                    : undefined,
+                )
+              }
+            >
+              <Plus size={16} />
+              Add{" "}
+              {page === "accounts" || page === "chart" ? "account" : "category"}
+            </button>
+          </div>
         )}
       </div>
       <div className="table-toolbar">
@@ -1902,7 +1856,7 @@ function MasterPage({
           title={`No ${page === "chart" ? "accounts" : page} yet`}
           text={
             ownData
-              ? "Ask your finance administrator to link your employee record and assign a cash account."
+              ? "Ask your finance administrator to link your cash custodian record and assign a cash account."
               : "Add a record to start organizing your company finances."
           }
         />
@@ -1945,7 +1899,7 @@ function MasterModal({
   const set = (key: string, v: any) => setForm((f) => ({ ...f, [key]: v }));
   return (
     <Modal
-      title={`${row?.id ? "Edit" : "Add"} ${table === "accounts" ? "account" : table === "contacts" ? form.kind : table === "projects" ? "project" : "category"}`}
+      title={`${row?.id ? "Edit" : "Add"} ${table === "accounts" ? "account" : table === "contacts" ? (form.kind === "employee" ? "cash custodian" : form.kind) : "category"}`}
       onClose={onClose}
     >
       <FormShell onClose={onClose} onSave={() => onSave(form)} wide>
@@ -2044,18 +1998,20 @@ function MasterModal({
         )}
         {table === "contacts" && (
           <>
-            <Field label="Contact type">
-              <select
-                value={form.kind}
-                onChange={(e) => set("kind", e.target.value)}
-              >
-                {["customer", "vendor", "employee"].map((k) => (
-                  <option key={k} value={k}>
-                    {title(k)}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            {form.kind !== "employee" && (
+              <Field label="Contact type">
+                <select
+                  value={form.kind}
+                  onChange={(e) => set("kind", e.target.value)}
+                >
+                  {["customer", "vendor"].map((k) => (
+                    <option key={k} value={k}>
+                      {title(k)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
             <Field label="Email">
               <input
                 type="email"
@@ -2069,18 +2025,22 @@ function MasterModal({
                 onChange={(e) => set("phone", e.target.value)}
               />
             </Field>
-            <Field label="Tax number">
-              <input
-                value={form.tax_number}
-                onChange={(e) => set("tax_number", e.target.value)}
-              />
-            </Field>
-            <Field label="Bank / payment information" wide>
-              <textarea
-                value={form.bank_details}
-                onChange={(e) => set("bank_details", e.target.value)}
-              />
-            </Field>
+            {form.kind !== "employee" && (
+              <>
+                <Field label="Tax number">
+                  <input
+                    value={form.tax_number}
+                    onChange={(e) => set("tax_number", e.target.value)}
+                  />
+                </Field>
+                <Field label="Bank / payment information" wide>
+                  <textarea
+                    value={form.bank_details}
+                    onChange={(e) => set("bank_details", e.target.value)}
+                  />
+                </Field>
+              </>
+            )}
           </>
         )}
         {table === "categories" && (
@@ -2109,7 +2069,8 @@ function MasterModal({
                 options={data.accounts.filter(
                   (a) =>
                     a.active &&
-                    (a.type === "expense" || a.purpose === "fixed_asset"),
+                    a.type === "expense" &&
+                    a.purpose !== "depreciation",
                 )}
               />
             </Field>
@@ -2147,18 +2108,9 @@ function PeoplePage({
   onSelect: (d: Row) => void;
 }) {
   const [tab, setTab] = useState("open");
-  const kind =
-      page === "receivables"
-        ? "customer"
-        : page === "payables"
-          ? "vendor"
-          : "employee",
+  const kind = page === "receivables" ? "customer" : "vendor",
     docKinds =
-      page === "receivables"
-        ? ["invoice"]
-        : page === "payables"
-          ? ["bill", "asset_purchase"]
-          : ["advance"];
+      page === "receivables" ? ["invoice"] : ["bill", "asset_purchase"];
   const rows = documents.filter(
     (d) =>
       !d.inbound &&
@@ -2169,12 +2121,7 @@ function PeoplePage({
     (d) => d.status === "posted" && Number(d.amount) > Number(d.allocated),
   );
   const people = data.contacts.filter((c) => c.kind === kind);
-  const create =
-    page === "receivables"
-      ? "invoice"
-      : page === "payables"
-        ? "bill"
-        : "advance";
+  const create = page === "receivables" ? "invoice" : "bill";
   return (
     <>
       <div className="mini-stats">
@@ -2191,14 +2138,7 @@ function PeoplePage({
           </strong>
         </div>
         <div className="card">
-          <span>
-            Open{" "}
-            {page === "advances"
-              ? "advances"
-              : page === "payables"
-                ? "bills"
-                : "invoices"}
-          </span>
+          <span>Open {page === "payables" ? "bills" : "invoices"}</span>
           <strong>{outstanding.length}</strong>
         </div>
         <div className="card">
@@ -2210,22 +2150,14 @@ function PeoplePage({
         <div className="card-heading">
           <div>
             <h2>
-              {page === "advances"
-                ? ownData
-                  ? "My advance balances"
-                  : "Employee funds"
-                : page === "payables"
-                  ? "Vendor balances"
-                  : "Client balances"}
+              {page === "payables" ? "Vendor balances" : "Client balances"}
             </h2>
             <p>Follow each document from creation to settlement.</p>
           </div>
           {can("transactions.create") && (
             <button className="button compact" onClick={() => onNew(create)}>
               <Plus size={16} />
-              {ownData && create === "advance"
-                ? "Request advance"
-                : kindLabels[create]}
+              {kindLabels[create]}
             </button>
           )}
         </div>
@@ -2393,8 +2325,6 @@ function TransactionModal({
       rate: "1",
       description: "",
       reference: "",
-      salvage: "0",
-      usefulLife: 36,
       openingSide: "debit",
       ...prefill,
     }),
@@ -2424,8 +2354,6 @@ function TransactionModal({
       "withdrawal",
       "expense",
       "vendor_payment",
-      "advance",
-      "asset_purchase",
       "intercompany",
       "adjustment",
     ].includes(k),
@@ -2434,26 +2362,17 @@ function TransactionModal({
       "transfer",
       "withdrawal",
       "client_payment",
-      "advance_return",
       "intercompany",
       "opening",
       "adjustment",
     ].includes(k),
-    head = [
-      "receipt",
-      "expense",
-      "bill",
-      "invoice",
-      "advance_expense",
-    ].includes(k),
-    category = ["expense", "bill", "advance_expense"].includes(k);
+    head = ["receipt", "expense", "bill", "invoice"].includes(k),
+    category = ["expense", "bill"].includes(k);
   const contactKind = ["invoice", "client_payment"].includes(k)
     ? "customer"
-    : ["bill", "vendor_payment", "asset_purchase"].includes(k)
+    : ["bill", "vendor_payment"].includes(k)
       ? "vendor"
-      : ["advance", "advance_expense", "advance_return"].includes(k)
-        ? "employee"
-        : null;
+      : null;
   const cash = data.accounts.filter(
     (a) => a.active && ["bank", "cash"].includes(a.purpose),
   );
@@ -2474,16 +2393,9 @@ function TransactionModal({
         ? ["revenue", "equity", "liability"].includes(a.type)
         : k === "invoice"
           ? a.type === "revenue"
-          : k === "bill"
-            ? a.type === "expense" || a.purpose === "fixed_asset"
-            : a.type === "expense"),
+          : a.type === "expense" && a.purpose !== "depreciation"),
   );
-  const settle = [
-    "client_payment",
-    "vendor_payment",
-    "advance_expense",
-    "advance_return",
-  ].includes(k);
+  const settle = ["client_payment", "vendor_payment"].includes(k);
   const related = documents.filter(
     (d) =>
       !d.inbound &&
@@ -2491,50 +2403,31 @@ function TransactionModal({
       Number(d.amount) > Number(d.allocated) &&
       (k === "client_payment"
         ? d.kind === "invoice"
-        : k === "vendor_payment"
-          ? d.kind === "bill" || (d.kind === "asset_purchase" && !d.source_id)
-          : d.kind === "advance"),
+        : d.kind === "bill" || (d.kind === "asset_purchase" && !d.source_id)),
   );
   const targetAccount = targets.find((a) => a.id === form.targetId);
   const cross =
     k === "transfer" &&
     targetAccount &&
     targetAccount.currency !== form.currency;
-  const asset =
-    k === "asset_purchase" ||
-    (k === "bill" &&
-      data.accounts.find(
-        (a) =>
-          a.id ===
-          (form.categoryId
-            ? data.categories.find((c) => c.id === form.categoryId)?.account_id
-            : form.headId),
-      )?.purpose === "fixed_asset");
-  const options = Object.entries(kindLabels).filter(
+  const options = activeKindLabels.filter(
     ([key]) =>
-      key !== "depreciation" &&
       (ownData
-        ? [
-            "expense",
-            "advance",
-            "advance_expense",
-            "advance_return",
-            "transfer",
-          ].includes(key)
-        : user.role !== "employee" || ["expense", "advance"].includes(key)) &&
+        ? ["expense", "transfer"].includes(key)
+        : user.role !== "employee" || key === "expense") &&
       (!["opening", "adjustment"].includes(key) ||
         user.permissions.includes("accounting.manage")),
   );
   return (
     <Modal
-      title={ownData && k === "advance" ? "Request advance" : kindLabels[k]}
+      title={kindLabels[k]}
       description="Describe the business action. The accounting entries are created automatically."
       onClose={onClose}
       wide
     >
       <FormShell
         onClose={onClose}
-        saveLabel="Save draft"
+        saveLabel="Save pending"
         wide
         onSave={() => {
           const payload: Row = {
@@ -2545,7 +2438,6 @@ function TransactionModal({
             rate: form.currency === "PKR" ? "1" : form.rate,
             description: form.description,
             reference: form.reference,
-            projectId: form.projectId || null,
           };
           if (source) payload.sourceId = form.sourceId || null;
           if (target) payload.targetId = form.targetId || null;
@@ -2559,11 +2451,6 @@ function TransactionModal({
             payload.dueDate = form.dueDate;
           if (k === "intercompany")
             payload.otherCompanyId = form.otherCompanyId;
-          if (asset) {
-            payload.assetName = form.assetName;
-            payload.usefulLife = Number(form.usefulLife);
-            payload.salvage = form.salvage;
-          }
           if (cross) {
             payload.targetAmount = form.targetAmount;
             payload.targetRate =
@@ -2585,15 +2472,13 @@ function TransactionModal({
                 description: "",
                 reference: "",
                 kind: e.target.value,
-                salvage: "0",
-                usefulLife: 36,
                 openingSide: "debit",
               }))
             }
           >
             {options.map(([key, label]) => (
               <option key={key} value={key}>
-                {ownData && key === "advance" ? "Request advance" : label}
+                {label}
               </option>
             ))}
           </select>
@@ -2605,13 +2490,14 @@ function TransactionModal({
               <Landmark size={18} />
               <span>
                 {ownData ? (
-                  "Ask your finance administrator to link your employee record and assign your petty-cash account. You can still submit an advance request without choosing a payment account."
+                  "Ask your finance administrator to link your cash custodian record and assign your petty-cash account."
                 ) : (
                   <>
                     Add a bank or cash account from{" "}
                     <strong>Bank &amp; cash</strong> before recording payments
-                    or transfers. For cash held by an employee, add the employee
-                    first, then assign them as the cash account’s custodian.
+                    or transfers. For cash held by a custodian, use Add cash
+                    custodian in Bank & cash, then assign them to the cash
+                    account.
                   </>
                 )}
               </span>
@@ -2652,7 +2538,6 @@ function TransactionModal({
                   amount: doc
                     ? String(Number(doc.amount) - Number(doc.allocated))
                     : "",
-                  projectId: doc?.project_id,
                 }));
               }}
             />
@@ -2675,30 +2560,18 @@ function TransactionModal({
         {source && (
           <Field
             label={
-              k === "adjustment"
-                ? "Credit account"
-                : ownData && k === "advance"
-                  ? "Payment account (optional)"
-                  : k === "asset_purchase"
-                    ? "Paid from (leave empty for vendor payable)"
-                    : "Paid / transferred from"
+              k === "adjustment" ? "Credit account" : "Paid / transferred from"
             }
           >
             <Select
-              required={k !== "asset_purchase" && !(ownData && k === "advance")}
+              required
               value={form.sourceId}
               options={
                 k === "adjustment"
                   ? data.accounts.filter((a) => a.active)
                   : cash
               }
-              placeholder={
-                k === "asset_purchase"
-                  ? "Record as vendor payable"
-                  : ownData && k === "advance"
-                    ? "Finance will choose the payment account"
-                    : "Select source account"
-              }
+              placeholder="Select source account"
               onChange={(v) => {
                 const a = data.accounts.find((a) => a.id === Number(v));
                 set("sourceId", v ? Number(v) : null);
@@ -2828,9 +2701,8 @@ function TransactionModal({
                 .filter(
                   (c) =>
                     c.active &&
-                    (k === "bill" ||
-                      data.accounts.find((a) => a.id === c.account_id)?.type ===
-                        "expense"),
+                    data.accounts.find((a) => a.id === c.account_id)?.type ===
+                      "expense",
                 )
                 .map((c) => ({
                   ...c,
@@ -2865,20 +2737,14 @@ function TransactionModal({
         <Field label={contactKind ? title(contactKind) : "Contact (optional)"}>
           <Select
             value={form.contactId}
-            required={!!contactKind && k !== "asset_purchase"}
+            required={!!contactKind}
             options={data.contacts.filter(
-              (c) => c.active && (!contactKind || c.kind === contactKind),
+              (c) =>
+                c.active &&
+                (contactKind ? c.kind === contactKind : c.kind !== "employee"),
             )}
             onChange={(v) => set("contactId", v ? Number(v) : null)}
             placeholder={contactKind ? `Select ${contactKind}` : "No contact"}
-          />
-        </Field>
-        <Field label="Project (optional)">
-          <Select
-            value={form.projectId}
-            onChange={(v) => set("projectId", v ? Number(v) : null)}
-            options={data.projects.filter((p) => p.active)}
-            placeholder="General company activity"
           />
         </Field>
         {["invoice", "bill"].includes(k) && (
@@ -2889,42 +2755,6 @@ function TransactionModal({
               onChange={(e) => set("dueDate", e.target.value)}
             />
           </Field>
-        )}
-        {asset && (
-          <>
-            <div className="form-section wide">
-              <Package size={18} />
-              <strong>Asset details</strong>
-            </div>
-            <Field label="Asset name">
-              <input
-                value={form.assetName || ""}
-                onChange={(e) => set("assetName", e.target.value)}
-                placeholder="e.g. Animation workstation"
-                required
-              />
-            </Field>
-            <Field label="Useful life (months)">
-              <input
-                type="number"
-                min="1"
-                max="600"
-                value={form.usefulLife}
-                onChange={(e) => set("usefulLife", Number(e.target.value))}
-                required
-              />
-            </Field>
-            <Field label="Salvage value (PKR)">
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.salvage}
-                onChange={(e) => set("salvage", e.target.value)}
-                required
-              />
-            </Field>
-          </>
         )}
         <Field label="Description / notes" wide>
           <textarea
@@ -2938,8 +2768,8 @@ function TransactionModal({
         <div className="info wide">
           <FileText size={18} />
           <span>
-            This saves a draft. Attach receipts and submit for approval from the
-            transaction details.
+            This saves a pending transaction. Attach receipts, then use Post
+            transaction to update balances if you have posting permission.
           </span>
         </div>
       </FormShell>
@@ -2992,11 +2822,19 @@ function DocumentDetail({
     }
   };
   const canActOnDocument = user.dataScope !== "own" || doc.can_manage === true;
-  const approvalBlockReason = !canActOnDocument
-    ? "This transaction was recorded for you. Your finance team manages its approval and posting."
-    : !can("transactions.approve")
-      ? "Your account does not have transaction approval permission. Anyone with this permission can approve, including the creator."
-      : null;
+  const retired =
+    retiredKinds.has(doc.kind) ||
+    doc.retired === true ||
+    (doc.kind === "bill" &&
+      data.accounts.find(
+        (account) =>
+          account.id ===
+          (doc.category_id
+            ? data.categories.find(
+                (category) => category.id === doc.category_id,
+              )?.account_id
+            : doc.head_id),
+      )?.purpose === "fixed_asset");
   const canManageSubmission =
     canActOnDocument &&
     (user.role !== "employee" || doc.created_by === user.id);
@@ -3007,9 +2845,7 @@ function DocumentDetail({
         : doc.kind === "bill" ||
             (doc.kind === "asset_purchase" && !doc.source_id)
           ? "vendor_payment"
-          : doc.kind === "advance"
-            ? "advance_expense"
-            : null;
+          : null;
   return (
     <Modal
       title={`Transaction #${String(doc.id).padStart(5, "0")}`}
@@ -3045,12 +2881,6 @@ function DocumentDetail({
               "—",
           ],
           [
-            "Project",
-            doc.project_name ||
-              data.projects.find((p) => p.id === doc.project_id)?.name ||
-              "General company",
-          ],
-          [
             "Paid from",
             data.accounts.find((a) => a.id === doc.source_id)?.name || "—",
           ],
@@ -3082,7 +2912,7 @@ function DocumentDetail({
               <Paperclip size={17} />
               Receipts & documents
             </h3>
-            {canManageSubmission && can("transactions.create") && (
+            {!retired && canManageSubmission && can("transactions.create") && (
               <label className="button secondary compact upload-label">
                 <Plus size={15} />
                 Attach files
@@ -3167,10 +2997,13 @@ function DocumentDetail({
           {error}
         </div>
       )}
-      {!doc.inbound && doc.status === "submitted" && approvalBlockReason && (
-        <div className="info" id="approval-restriction" role="status">
-          <ShieldCheck size={18} />
-          <span>{approvalBlockReason}</span>
+      {retired && (
+        <div className="info" role="status">
+          <History size={18} />
+          <span>
+            This transaction belongs to a removed module. Its accounting history
+            is retained; new entries of this type are unavailable.
+          </span>
         </div>
       )}
       <div className="modal-footer wrap">
@@ -3181,20 +3014,19 @@ function DocumentDetail({
           <>
             {canManageSubmission &&
               can("transactions.create") &&
-              ["draft", "rejected"].includes(doc.status) && (
+              !retired &&
+              doc.status === "pending" && (
                 <button
                   className="button secondary"
                   disabled={busy}
                   onClick={onEdit}
                 >
-                  Edit draft
+                  Edit transaction
                 </button>
               )}
             {canManageSubmission &&
               can("transactions.create") &&
-              ["draft", "submitted", "approved", "rejected"].includes(
-                doc.status,
-              ) && (
+              doc.status === "pending" && (
                 <button
                   className="text-button negative"
                   disabled={busy}
@@ -3203,47 +3035,10 @@ function DocumentDetail({
                   Cancel transaction
                 </button>
               )}
-            {canManageSubmission &&
-              can("transactions.submit") &&
-              ["draft", "rejected"].includes(doc.status) && (
-                <button
-                  className="button"
-                  disabled={busy}
-                  onClick={() => action("submit")}
-                >
-                  Submit for approval
-                </button>
-              )}
-            {canActOnDocument && doc.status === "submitted" && (
-              <>
-                <button
-                  className="button secondary"
-                  disabled={busy || !!approvalBlockReason}
-                  aria-describedby={
-                    approvalBlockReason ? "approval-restriction" : undefined
-                  }
-                  onClick={() => action("reject")}
-                >
-                  Reject
-                </button>
-                <button
-                  className="button"
-                  disabled={busy || !!approvalBlockReason}
-                  aria-describedby={
-                    approvalBlockReason ? "approval-restriction" : undefined
-                  }
-                  onClick={() => action("approve")}
-                >
-                  Approve
-                </button>
-              </>
-            )}
             {canActOnDocument &&
               can("transactions.post") &&
-              (doc.status === "approved" ||
-                (doc.status === "draft" &&
-                  (!data.company.approvals ||
-                    ["opening", "adjustment"].includes(doc.kind)))) && (
+              !retired &&
+              doc.status === "pending" && (
                 <button
                   className="button"
                   disabled={busy}
@@ -3271,17 +3066,6 @@ function DocumentDetail({
                   {kindLabels[settleKind]}
                 </button>
               )}
-            {can("transactions.create") &&
-              doc.status === "posted" &&
-              doc.kind === "advance" &&
-              outstanding > 0 && (
-                <button
-                  className="button secondary"
-                  onClick={() => onSettle("advance_return")}
-                >
-                  Return remaining funds
-                </button>
-              )}
           </>
         )}
       </div>
@@ -3289,175 +3073,6 @@ function DocumentDetail({
   );
 }
 
-function Assets({
-  base,
-  refresh,
-  can,
-  notify,
-  reload,
-  onNew,
-}: {
-  base: string;
-  refresh: number;
-  can: (p: string) => boolean;
-  notify: (s: string) => void;
-  reload: () => void;
-  onNew: () => void;
-}) {
-  const [rows, setRows] = useState<Row[]>([]),
-    [error, setError] = useState(""),
-    [asset, setAsset] = useState<Row | null>(null),
-    [date, setDate] = useState(today());
-  useEffect(() => {
-    api(base + "/assets")
-      .then(setRows)
-      .catch((e) => setError(e.message));
-  }, [base, refresh]);
-  return (
-    <>
-      <div className="mini-stats">
-        <div className="card">
-          <span>Acquisition cost</span>
-          <strong>
-            {money(
-              rows
-                .filter((a) => a.active)
-                .reduce((s, a) => s + Number(a.cost), 0),
-            )}
-          </strong>
-        </div>
-        <div className="card">
-          <span>Accumulated depreciation</span>
-          <strong>
-            {money(
-              rows
-                .filter((a) => a.active)
-                .reduce((s, a) => s + Number(a.depreciated), 0),
-            )}
-          </strong>
-        </div>
-        <div className="card">
-          <span>Net book value</span>
-          <strong>
-            {money(
-              rows
-                .filter((a) => a.active)
-                .reduce(
-                  (s, a) => s + Number(a.cost) - Number(a.depreciated),
-                  0,
-                ),
-            )}
-          </strong>
-        </div>
-      </div>
-      <section className="card">
-        <div className="card-heading">
-          <div>
-            <h2>Asset register</h2>
-            <p>
-              Monthly straight-line depreciation, with a retained audit trail.
-            </p>
-          </div>
-          {can("transactions.create") && (
-            <button className="button compact" onClick={onNew}>
-              <Plus size={16} />
-              Purchase asset
-            </button>
-          )}
-        </div>
-        {error && <div className="error">{error}</div>}
-        {rows.length ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Asset</th>
-                  <th>Acquired</th>
-                  <th>Useful life</th>
-                  <th className="align-right">Cost</th>
-                  <th className="align-right">Book value</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((a) => (
-                  <tr key={a.id}>
-                    <td>
-                      <strong>{a.name}</strong>
-                      <small>{a.active ? "Active" : "Reversed purchase"}</small>
-                    </td>
-                    <td>{dateLabel(a.acquired)}</td>
-                    <td>{a.useful_life} months</td>
-                    <td className="align-right">{money(a.cost)}</td>
-                    <td className="align-right amount">
-                      {money(Number(a.cost) - Number(a.depreciated))}
-                    </td>
-                    <td>
-                      {can("accounting.manage") &&
-                        a.active &&
-                        Number(a.cost) - Number(a.depreciated) >
-                          Number(a.salvage) && (
-                          <button
-                            className="text-button"
-                            onClick={() => setAsset(a)}
-                          >
-                            Depreciate
-                          </button>
-                        )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <Empty
-            title="Your asset register is ready"
-            text="Post an asset purchase to track its cost and depreciation here."
-          />
-        )}
-      </section>
-      {asset && (
-        <Modal
-          title={`Depreciate ${asset.name}`}
-          description="Post one monthly depreciation installment."
-          onClose={() => setAsset(null)}
-        >
-          <FormShell
-            onClose={() => setAsset(null)}
-            saveLabel="Post depreciation"
-            onSave={async () => {
-              await api(`${base}/assets/${asset.id}/depreciate`, "POST", {
-                date,
-              });
-              setAsset(null);
-              notify("Monthly depreciation posted");
-              reload();
-            }}
-          >
-            <Field label="Posting date">
-              <input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                required
-              />
-            </Field>
-            <div className="info">
-              Monthly depreciation:{" "}
-              {money(
-                (Number(asset.cost) - Number(asset.salvage)) /
-                  asset.useful_life,
-              )}
-              . The final installment is capped at the remaining depreciable
-              value.
-            </div>
-          </FormShell>
-        </Modal>
-      )}
-    </>
-  );
-}
 function Reports({
   report,
   documents,
@@ -3480,8 +3095,6 @@ function Reports({
     ["ledger", "General ledger"],
     ["journal", "Journal"],
     ["category", "Expenses by category"],
-    ["project", "Project performance"],
-    ["employee", "Employee advances"],
     ["employee_expenses", "Expense by employee"],
     ["employee_cash", "Cash by employee"],
     ["cash", "Cash position"],
@@ -3542,15 +3155,6 @@ function Reports({
   } else if (type === "trial") rows = report.trial || [];
   else if (type === "cashflow") rows = report.cashFlow || [];
   else if (type === "category") rows = report.byCategory || [];
-  else if (type === "project") {
-    rows = report.byProject || [];
-    columns = [
-      ["name", "Project"],
-      ["revenue", "Revenue", "money"],
-      ["expenses", "Expenses", "money"],
-      ["profit", "Profit / loss", "money"],
-    ];
-  } else if (type === "employee") rows = report.byEmployee || [];
   else if (type === "employee_expenses") rows = report.expenseByEmployee || [];
   else if (type === "employee_cash") rows = report.cashByEmployee || [];
   else if (type === "cash") rows = report.cashPosition || [];
@@ -3570,8 +3174,7 @@ function Reports({
         (!account || r.account_id === Number(account)) &&
         (!contact || r.contact_id === Number(contact)) &&
         (type !== "bank" || r.purpose === "bank") &&
-        (type !== "contact" ||
-          ["receivable", "payable", "advance"].includes(r.purpose)) &&
+        (type !== "contact" || ["receivable", "payable"].includes(r.purpose)) &&
         (type !== "intercompany" || ["due_from", "due_to"].includes(r.purpose)),
     );
     columns = [
@@ -3763,185 +3366,6 @@ function Reports({
     </section>
   );
 }
-function Reconciliation({
-  base,
-  data,
-  notify,
-  reload,
-  refresh,
-}: {
-  base: string;
-  data: Data;
-  notify: (s: string) => void;
-  reload: () => void;
-  refresh: number;
-}) {
-  const [rows, setRows] = useState<Row[]>([]),
-    [account, setAccount] = useState(""),
-    [date, setDate] = useState(today()),
-    [balance, setBalance] = useState(""),
-    [ids, setIds] = useState<number[]>([]),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  useEffect(() => {
-    api(base + "/reconciliation")
-      .then(setRows)
-      .catch((e) => setError(e.message));
-  }, [base, refresh]);
-  const filtered = rows.filter(
-    (r) =>
-      r.account_id === Number(account) &&
-      !r.reconciliation_id &&
-      r.date <= date,
-  );
-  const cleared = rows
-      .filter((r) => r.account_id === Number(account) && r.reconciliation_id)
-      .reduce((s, r) => s + Number(r.foreign_amount), 0),
-    selected = rows
-      .filter((r) => ids.includes(r.id))
-      .reduce((s, r) => s + Number(r.foreign_amount), 0);
-  const currency =
-    data.accounts.find((a) => a.id === Number(account))?.currency || "PKR";
-  return (
-    <section className="card">
-      <div className="card-heading">
-        <div>
-          <h2>Match your bank statement</h2>
-          <p>
-            Select cleared transactions until the balance matches your
-            statement.
-          </p>
-        </div>
-      </div>
-      <div className="reconciliation-form">
-        <Field label="Bank account">
-          <Select
-            value={account}
-            onChange={(v) => {
-              setAccount(v);
-              setIds([]);
-            }}
-            options={data.accounts.filter((a) => a.purpose === "bank")}
-            required
-          />
-        </Field>
-        <Field label="Statement date">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => {
-              setDate(e.target.value);
-              setIds([]);
-            }}
-          />
-        </Field>
-        <Field label={`Statement closing balance · ${currency}`}>
-          <input
-            type="number"
-            step="0.01"
-            value={balance}
-            onChange={(e) => setBalance(e.target.value)}
-            placeholder="0.00"
-          />
-        </Field>
-      </div>
-      <div className="reconciliation-summary">
-        <span>
-          Previously cleared <strong>{money(cleared, currency)}</strong>
-        </span>
-        <span>
-          Selected movement <strong>{money(selected, currency)}</strong>
-        </span>
-        <span>
-          Difference{" "}
-          <strong
-            className={
-              Math.abs(Number(balance) - cleared - selected) < 0.005
-                ? "positive"
-                : "negative"
-            }
-          >
-            {money(Number(balance) - cleared - selected, currency)}
-          </strong>
-        </span>
-      </div>
-      {error && <div className="error">{error}</div>}
-      {filtered.length ? (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th />
-                <th>Date</th>
-                <th>Description</th>
-                <th className="align-right">Movement</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((r) => (
-                <tr key={r.id}>
-                  <td>
-                    <input
-                      aria-label={`Select ${r.description}`}
-                      type="checkbox"
-                      checked={ids.includes(r.id)}
-                      onChange={(e) =>
-                        setIds((current) =>
-                          e.target.checked
-                            ? [...current, r.id]
-                            : current.filter((i) => i !== r.id),
-                        )
-                      }
-                    />
-                  </td>
-                  <td>{dateLabel(r.date)}</td>
-                  <td>{r.description}</td>
-                  <td className="align-right amount">
-                    {money(r.foreign_amount, currency)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <Empty
-          title={
-            account ? "No uncleared transactions" : "Select a bank account"
-          }
-          text="Posted bank entries that have not been reconciled will appear here."
-        />
-      )}
-      <div className="modal-footer">
-        <button
-          className="button"
-          disabled={busy || !ids.length || !balance}
-          onClick={async () => {
-            setBusy(true);
-            setError("");
-            try {
-              await api(base + "/reconciliation", "POST", {
-                accountId: Number(account),
-                date,
-                balance,
-                lineIds: ids,
-              });
-              setIds([]);
-              notify("Bank statement reconciled");
-              reload();
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          Complete reconciliation
-        </button>
-      </div>
-    </section>
-  );
-}
 function Audit({ base, refresh }: { base: string; refresh: number }) {
   const [rows, setRows] = useState<Row[]>([]),
     [error, setError] = useState(""),
@@ -4080,7 +3504,6 @@ function SettingsPage({
             try {
               await onSave({
                 name: form.name,
-                approvals: form.approvals,
                 locked_through: form.locked_through || null,
               });
               setSaved(true);
@@ -4101,23 +3524,6 @@ function SettingsPage({
           <Field label="Base currency">
             <input value="PKR — Pakistani rupee" disabled />
           </Field>
-          <label className="toggle-row">
-            <span>
-              <strong>Require approval before posting</strong>
-              <small>
-                Anyone with approval permission can approve, including the
-                creator.
-              </small>
-            </span>
-            <input
-              type="checkbox"
-              role="switch"
-              checked={!!form.approvals}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, approvals: e.target.checked }))
-              }
-            />
-          </label>
           <Field
             label="Lock accounting through"
             hint="New postings and reversals dated on or before this date are blocked."
@@ -4148,8 +3554,8 @@ function SettingsPage({
           </div>
           <div className="card-body">
             <p className="subtle">
-              Each company maintains its own accounts, balances, approvals, and
-              accounting periods.
+              Each company maintains its own accounts, balances, and accounting
+              periods.
             </p>
             <button className="button secondary" onClick={onNewCompany}>
               <Plus size={16} />
@@ -4512,10 +3918,10 @@ function AccessModal({
               </select>
               <small>
                 Own data only shows this user's submissions, assigned cash, and
-                advances. Company income, private payroll, and other users'
-                records stay hidden, even when approval permission is enabled.
-                Inherit role gives employees own-data access and other roles
-                company data. Super administrators retain full access.
+                cash transactions. Company income, private payroll, and other
+                users' records stay hidden, even when posting permission is
+                enabled. Inherit role gives employees own-data access and other
+                roles company data. Super administrators retain full access.
               </small>
             </Field>
             <label className="checkbox-label wide">
@@ -4554,23 +3960,26 @@ function AccessModal({
               </small>
             </div>
             <div className="wide employee-links">
-              <h3>Employee / cash custodian links</h3>
+              <h3>Cash custodian links</h3>
               <p className="subtle">
-                Link this login to an employee in each assigned company so the
-                user can see cash held in their name and advances issued to
-                them.
+                Link this login to a cash custodian in each assigned company so
+                the user can see cash held in their name and transactions
+                assigned to them.
               </p>
               {companies
                 .filter((company) => form.companies.includes(company.id))
                 .map((company) => (
-                  <Field key={company.id} label={`${company.name} employee`}>
+                  <Field
+                    key={company.id}
+                    label={`${company.name} cash custodian`}
+                  >
                     <Select
                       value={
                         form.employee_links.find(
                           (link: Row) => link.company_id === company.id,
                         )?.contact_id
                       }
-                      placeholder="No employee linked"
+                      placeholder="No cash custodian linked"
                       options={(admin.employees || []).filter(
                         (employee: Row) =>
                           employee.company_id === company.id &&
@@ -4592,7 +4001,7 @@ function AccessModal({
                 ))}
               {!form.companies.length && (
                 <small className="subtle">
-                  Select company access above to choose employee records.
+                  Select company access above to choose cash custodian records.
                 </small>
               )}
             </div>

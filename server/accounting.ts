@@ -1,6 +1,10 @@
 import Decimal from "decimal.js";
 import type { Connection } from "./db";
-import { documentSchema, type DocumentInput } from "../shared/domain";
+import {
+  documentSchema,
+  retiredKinds,
+  type DocumentInput,
+} from "../shared/domain";
 Decimal.set({ precision: 40 });
 export class RuleError extends Error {
   status = 400;
@@ -11,6 +15,38 @@ export const fail = (message: string, status = 400): never => {
   throw error;
 };
 export const value = (v: Decimal.Value) => new Decimal(v).toFixed(2);
+export async function assertActiveDocument(
+  c: Connection,
+  company: number,
+  input: Partial<DocumentInput>,
+  options: { allowLegacyProject?: boolean } = {},
+) {
+  if ((retiredKinds as readonly string[]).includes(input.kind || ""))
+    fail(
+      "This transaction type belongs to a removed module. Existing posted history is retained.",
+      410,
+    );
+  if (input.projectId && !options.allowLegacyProject)
+    fail("Projects are no longer managed in this app", 410);
+  if (
+    input.assetName !== undefined ||
+    input.usefulLife !== undefined ||
+    input.salvage !== undefined
+  )
+    fail("Fixed assets are no longer managed in this app", 410);
+  // Capital bills must not bypass removal of the fixed-asset workflow.
+  if (input.kind === "bill") {
+    const head = (
+      await c.query(
+        `SELECT a.purpose FROM accounts a WHERE a.company_id=$1 AND a.id=COALESCE(
+        (SELECT account_id FROM categories WHERE id=$2 AND company_id=$1),$3)`,
+        [company, input.categoryId ?? null, input.headId ?? null],
+      )
+    ).rows[0];
+    if (head?.purpose === "fixed_asset")
+      fail("Fixed asset purchases are no longer managed in this app", 410);
+  }
+}
 export async function audit(
   c: Connection,
   company: number | null,
@@ -129,18 +165,6 @@ export async function createCompany(c: Connection, user: number, name: string) {
       "other_expense",
       ["Taxes", "Legal fees", "Miscellaneous"],
     ],
-    [
-      "Capital purchases",
-      "fixed_asset",
-      [
-        "Computers",
-        "Workstations",
-        "Servers",
-        "Networking equipment",
-        "Furniture",
-        "Office equipment",
-      ],
-    ],
   ] as [string, string, string[]][]) {
     const parent = (
       await c.query(
@@ -173,6 +197,7 @@ export async function createDocument(
   input: unknown,
 ) {
   const d = documentSchema.parse(input);
+  await assertActiveDocument(c, company, d);
   if (
     Number.isNaN(Date.parse(d.date)) ||
     new Date(d.date).toISOString().slice(0, 10) !== d.date
@@ -248,14 +273,19 @@ export async function postDocument(
   ).rows[0];
   if (!d) fail("Transaction not found");
   if (d.status === "posted") return d;
-  if (
-    co.approvals &&
-    !["opening", "adjustment", "depreciation"].includes(d.kind) &&
-    d.status !== "approved"
-  )
-    fail("Approval is required before posting");
-  if (!["draft", "approved"].includes(d.status))
+  if (d.status !== "pending")
     fail("Transaction cannot be posted in its current state");
+  await assertActiveDocument(
+    c,
+    company,
+    {
+      kind: d.kind,
+      headId: d.head_id,
+      categoryId: d.category_id,
+      projectId: d.project_id,
+    },
+    { allowLegacyProject: true },
+  );
   if (co.locked_through && d.date <= co.locked_through)
     fail("This accounting period is locked");
   const accounts = (
@@ -325,16 +355,6 @@ export async function postDocument(
     ].includes(d.kind)
   )
     fail("Select a contact");
-  if (
-    d.project_id &&
-    !(
-      await c.query(
-        "SELECT 1 FROM projects WHERE id=$1 AND company_id=$2 AND active",
-        [d.project_id, company],
-      )
-    ).rows.length
-  )
-    fail("Project is disabled");
   let debit: number, credit: number;
   switch (d.kind) {
     case "receipt":

@@ -45,7 +45,7 @@ docker compose run --rm --no-deps --user root app chown -R node:node /app/upload
 docker compose up -d
 ```
 
-5. Verify user sign-in, company membership, trial-balance equality, outstanding receivables/payables/advances, recent journals, and several attachment downloads. Record the restore test result.
+5. Verify user sign-in, company membership, trial-balance equality, outstanding receivables/payables, Pending and Posted records, recent journals, and several attachment downloads. Compare any historical asset and advance ledger balances with the backup records. Record the restore test result.
 
 ## Application configuration
 

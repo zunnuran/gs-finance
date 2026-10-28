@@ -513,6 +513,15 @@ main {
   color: var(--muted);
   stroke-width: 1.6;
 }
+.master-heading,
+.card-actions {
+  flex-wrap: wrap;
+}
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .card-body {
   padding: 0 23px 23px;
 }
@@ -951,17 +960,14 @@ tr.clickable:hover {
   background: currentColor;
 }
 .badge.posted,
-.badge.active,
-.badge.approved {
+.badge.active {
   background: #edf4e7;
   color: #286440;
 }
-.badge.submitted,
-.badge.draft {
+.badge.pending {
   background: #faf5e5;
   color: #805f16;
 }
-.badge.rejected,
 .badge.cancelled,
 .badge.disabled {
   background: #faf0ec;
@@ -1616,29 +1622,6 @@ input[role="switch"]:checked:before {
   font-size: 11px;
   padding: 5px 8px;
 }
-.reconciliation-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 17px;
-  padding: 0 23px 22px;
-}
-.reconciliation-summary {
-  display: flex;
-  justify-content: space-between;
-  gap: 15px;
-  background: var(--surface-subtle);
-  padding: 18px 23px;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  font-size: 10px;
-  color: var(--muted);
-}
-.reconciliation-summary strong {
-  display: block;
-  margin-top: 7px;
-  font-size: 18px;
-  color: var(--muted);
-}
 .card > .modal-footer {
   padding: 20px 23px;
   margin-top: 0;
@@ -2071,12 +2054,6 @@ input[role="switch"]:checked:before {
   .login-form-side {
     padding: 35px;
   }
-  .reconciliation-form {
-    grid-template-columns: 1fr 1fr;
-  }
-  .reconciliation-form .field:first-child {
-    grid-column: 1/-1;
-  }
 }
 @media (max-width: 760px) {
   .sidebar {
@@ -2321,12 +2298,6 @@ input[role="switch"]:checked:before {
     align-items: center;
     margin-top: 30px;
   }
-  .reconciliation-summary {
-    flex-wrap: wrap;
-  }
-  .reconciliation-summary strong {
-    font-size: 15px;
-  }
   .audit-diff {
     grid-template-columns: 1fr;
   }
@@ -2386,12 +2357,6 @@ input[role="switch"]:checked:before {
   }
   .detail-grid {
     gap: 16px 10px;
-  }
-  .reconciliation-form {
-    grid-template-columns: 1fr;
-  }
-  .reconciliation-form .field:first-child {
-    grid-column: auto;
   }
   .document-banner {
     padding: 16px;

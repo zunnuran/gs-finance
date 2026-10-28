@@ -17,6 +17,7 @@ import {
   audit,
   createCompany,
   createDocument,
+  assertActiveDocument,
   postDocument,
   reverseDocument,
   fail,
@@ -54,6 +55,15 @@ const day = z
     "Invalid date",
   );
 const name = z.string().trim().min(1).max(150);
+const retiredDocumentSql = `(
+  d.kind IN ('advance','advance_expense','advance_return','asset_purchase','depreciation')
+  OR (d.kind='bill' AND (
+    EXISTS (SELECT 1 FROM accounts legacy_account WHERE legacy_account.id=COALESCE(
+      (SELECT account_id FROM categories WHERE id=d.category_id AND company_id=d.company_id),d.head_id
+    ) AND legacy_account.purpose='fixed_asset')
+    OR EXISTS (SELECT 1 FROM assets legacy_asset WHERE legacy_asset.document_id=d.id)
+  ))
+)`;
 // Explicit next() wrapper, since successful guards must continue routing.
 const scoped: RequestHandler = (req, res, next) => {
   Promise.resolve()
@@ -88,7 +98,6 @@ const masterSchemas = {
     bank_details: z.string().max(1000).default(""),
     active: z.boolean().default(true),
   }),
-  projects: z.object({ name, active: z.boolean().default(true) }),
   categories: z.object({
     name,
     parent_id: z.number().int().positive().nullable().optional(),
@@ -138,7 +147,7 @@ export function registerRoutes(app: Express) {
       const d = z
         .object({
           name,
-          approvals: z.boolean(),
+          approvals: z.literal(false).optional(),
           locked_through: day.nullable(),
         })
         .parse(req.body);
@@ -152,7 +161,7 @@ export function registerRoutes(app: Express) {
           const row = (
             await c.query(
               "UPDATE companies SET name=$1,approvals=$2,locked_through=$3 WHERE id=$4 RETURNING *",
-              [d.name, d.approvals, d.locked_through, id(req.params.company)],
+              [d.name, false, d.locked_through, id(req.params.company)],
             )
           ).rows[0];
           await audit(
@@ -181,6 +190,14 @@ export function registerRoutes(app: Express) {
       });
     next();
   });
+  app.use("/api/c/:company", (req, res, next) => {
+    if (/^\/(projects|assets|reconciliation)(\/|$)/.test(req.path))
+      return void res.status(410).json({
+        message:
+          "This module is no longer available in GSS Finance. Existing accounting history is retained.",
+      });
+    next();
+  });
   app.get(
     "/api/c/:company/my-cash",
     requirePermission("transactions.view"),
@@ -197,17 +214,36 @@ export function registerRoutes(app: Express) {
         res.json(await ownBootstrap(pool, req.actor, company));
         return;
       }
-      for (const table of ["accounts", "contacts", "projects", "categories"])
+      for (const table of ["accounts", "contacts", "categories"])
         data[table] = (
           await pool.query(
             `SELECT * FROM ${table} WHERE company_id=$1 ORDER BY id`,
             [company],
           )
         ).rows;
+      data.projects = [];
+      const categoryAccounts = new Map<number, any>(
+        data.accounts.map((account: any) => [account.id, account]),
+      );
+      data.categories = data.categories.filter((category: any) => {
+        const account = categoryAccounts.get(category.account_id);
+        return (
+          account?.type === "expense" && account.purpose !== "depreciation"
+        );
+      });
       if (!req.actor.permissions.includes("masters.manage"))
         data.contacts = data.contacts.map(
           ({ bank_details, tax_number, ...contact }: any) => contact,
         );
+      const categoryIds = new Set(
+        data.categories.map((category: any) => category.id),
+      );
+      data.categories = data.categories.map((category: any) => ({
+        ...category,
+        parent_id: categoryIds.has(category.parent_id)
+          ? category.parent_id
+          : null,
+      }));
       data.company = (
         await pool.query("SELECT * FROM companies WHERE id=$1", [company])
       ).rows[0];
@@ -299,13 +335,13 @@ export function registerRoutes(app: Express) {
                 if (
                   !(
                     await c.query(
-                      "SELECT 1 FROM accounts WHERE id=$1 AND company_id=$2 AND active AND (type='expense' OR purpose='fixed_asset')",
+                      "SELECT 1 FROM accounts WHERE id=$1 AND company_id=$2 AND active AND type='expense' AND purpose<>'depreciation'",
                       [d.account_id, company],
                     )
                   ).rows.length
                 )
                   fail(
-                    "Category must map to an expense or fixed asset account",
+                    "Category must map to an active operating expense account",
                   );
                 if (d.parent_id) {
                   const parents = (
@@ -370,7 +406,7 @@ export function registerRoutes(app: Express) {
         const context = await ownContext(pool, req.actor, company);
         const docs = (
           await pool.query(
-            `SELECT d.*,false inbound,ct.name contact_name,p.name project_name,u.full_name creator,
+            `SELECT d.*,${retiredDocumentSql} retired,false inbound,ct.name contact_name,p.name project_name,u.full_name creator,
           COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,
           COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base
           FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by
@@ -384,7 +420,7 @@ export function registerRoutes(app: Express) {
       res.json(
         (
           await pool.query(
-            `SELECT d.*,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by WHERE (d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND ($2::integer IS NULL OR d.created_by=$2) ORDER BY d.date DESC,d.id DESC`,
+            `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by WHERE (d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND ($2::integer IS NULL OR d.created_by=$2) ORDER BY d.date DESC,d.id DESC`,
             [company, null],
           )
         ).rows,
@@ -398,11 +434,11 @@ export function registerRoutes(app: Express) {
       if (
         req.actor.dataScope !== "own" &&
         req.actor.role === "employee" &&
-        !["expense", "advance"].includes(req.body.kind)
+        req.body.kind !== "expense"
       )
-        fail("Employees can submit expenses and advances");
+        fail("Employees can create expenses");
       if (
-        ["opening", "adjustment", "depreciation"].includes(req.body.kind) &&
+        ["opening", "adjustment"].includes(req.body.kind) &&
         !req.actor.permissions.includes("accounting.manage")
       )
         fail("Accounting permission is required");
@@ -414,6 +450,7 @@ export function registerRoutes(app: Express) {
       res.json(
         await transaction(async (c) => {
           const input = documentSchema.parse(req.body);
+          await assertActiveDocument(c, id(req.params.company), input);
           await assertOwnInput(c, req.actor, id(req.params.company), input);
           return createDocument(c, id(req.params.company), req.actor.id, input);
         }),
@@ -431,6 +468,7 @@ export function registerRoutes(app: Express) {
             d = documentSchema.parse(req.body);
           await assertOwnDocument(c, req.actor, company, doc, true);
           await assertOwnInput(c, req.actor, company, d);
+          await assertActiveDocument(c, company, d);
           const before =
             (
               await c.query(
@@ -438,17 +476,19 @@ export function registerRoutes(app: Express) {
                 [doc, company],
               )
             ).rows[0] ?? fail("Document not found");
-          if (!["draft", "rejected"].includes(before.status))
-            fail("Only drafts and rejected transactions can be edited");
+          if (before.status !== "pending")
+            fail("Only pending transactions can be edited");
+          await assertActiveDocument(c, company, documentInput(before), {
+            allowLegacyProject: true,
+          });
           if (
             req.actor.dataScope !== "own" &&
             req.actor.role === "employee" &&
-            (before.created_by !== req.actor.id ||
-              !["expense", "advance"].includes(d.kind))
+            (before.created_by !== req.actor.id || d.kind !== "expense")
           )
-            fail("Employees can edit their own expense or advance submissions");
+            fail("Employees can edit their own pending expenses");
           if (
-            ["opening", "adjustment", "depreciation"].includes(d.kind) &&
+            ["opening", "adjustment"].includes(d.kind) &&
             !req.actor.permissions.includes("accounting.manage")
           )
             fail("Accounting permission is required");
@@ -478,7 +518,7 @@ export function registerRoutes(app: Express) {
           };
           const row = (
             await c.query(
-              `UPDATE documents SET kind=$1,date=$2,amount=$3,currency=$4,rate=$5,base_amount=$6,description=$7,reference=$8,due_date=$9,source_id=$10,target_id=$11,head_id=$12,contact_id=$13,project_id=$14,category_id=$15,related_id=$16,other_company_id=$17,extra=$18,status='draft',approved_by=NULL WHERE id=$19 RETURNING *`,
+              `UPDATE documents SET kind=$1,date=$2,amount=$3,currency=$4,rate=$5,base_amount=$6,description=$7,reference=$8,due_date=$9,source_id=$10,target_id=$11,head_id=$12,contact_id=$13,project_id=$14,category_id=$15,related_id=$16,other_company_id=$17,extra=$18,status='pending',approved_by=NULL WHERE id=$19 RETURNING *`,
               [
                 d.kind,
                 d.date,
@@ -520,15 +560,17 @@ export function registerRoutes(app: Express) {
   app.post(
     "/api/c/:company/documents/:id/:action(submit|approve|reject|cancel|post|reverse)",
     route(async (req, res) => {
+      if (["submit", "approve", "reject"].includes(req.params.action))
+        return res.status(410).json({
+          message:
+            "Transactions now move directly from Pending to Posted. Posting permission is required.",
+        });
       const action = z
-          .enum(["submit", "approve", "reject", "cancel", "post", "reverse"])
+          .enum(["cancel", "post", "reverse"])
           .parse(req.params.action),
         company = id(req.params.company),
         doc = id(req.params.id);
       const required = {
-        submit: "transactions.submit",
-        approve: "transactions.approve",
-        reject: "transactions.approve",
         cancel: "transactions.create",
         post: "transactions.post",
         reverse: "transactions.reverse",
@@ -540,7 +582,7 @@ export function registerRoutes(app: Express) {
           if (action === "post" || action === "reverse")
             await c.query("SELECT id FROM companies ORDER BY id FOR UPDATE");
           await assertOwnDocument(c, req.actor, company, doc, true);
-          if (req.actor.dataScope === "own") {
+          if (req.actor.dataScope === "own" && action === "post") {
             const current = (
               await c.query(
                 "SELECT * FROM documents WHERE id=$1 AND company_id=$2 FOR UPDATE",
@@ -548,7 +590,12 @@ export function registerRoutes(app: Express) {
               )
             ).rows[0];
             if (!current) denyScope();
-            await assertOwnInput(c, req.actor, company, documentInput(current));
+            const currentInput = documentInput(current);
+            // Historical project links do not expand access; new links remain disabled.
+            await assertOwnInput(c, req.actor, company, {
+              ...currentInput,
+              projectId: null,
+            });
           }
           if (action === "post" || action === "reverse") {
             // Stable company locks also make two-company posting/reversal atomic without deadlocks.
@@ -569,8 +616,12 @@ export function registerRoutes(app: Express) {
               !req.actor.permissions.includes("accounting.manage")
             )
               fail("Accounting permission is required");
-            if (action === "post")
+            if (action === "post") {
+              await assertActiveDocument(c, company, documentInput(d), {
+                allowLegacyProject: true,
+              });
               return postDocument(c, company, req.actor.id, doc);
+            }
             await reverseDocument(
               c,
               company,
@@ -587,35 +638,16 @@ export function registerRoutes(app: Express) {
                 [doc, company],
               )
             ).rows[0] ?? fail("Transaction not found");
-          if (
-            req.actor.role === "employee" &&
-            d.created_by !== req.actor.id &&
-            !["approve", "reject"].includes(action)
-          )
+          if (req.actor.role === "employee" && d.created_by !== req.actor.id)
             fail("Only your own submissions can be changed");
-          if (
-            ["approve", "reject"].includes(action) &&
-            d.status !== "submitted"
-          )
-            fail("Only submitted transactions can be approved or rejected");
-          if (action === "submit" && !["draft", "rejected"].includes(d.status))
-            fail("Only drafts or rejected transactions can be submitted");
-          if (
-            action === "cancel" &&
-            !["draft", "rejected", "submitted", "approved"].includes(d.status)
-          )
-            fail("Posted transactions require reversal");
-          const status = (
-            {
-              submit: "submitted",
-              approve: "approved",
-              reject: "rejected",
-              cancel: "cancelled",
-            } as Record<string, string>
-          )[action];
+          if (d.status !== "pending")
+            fail(
+              "Only pending transactions can be cancelled; posted transactions require reversal",
+            );
+          const status = "cancelled";
           await c.query(
             "UPDATE documents SET status=$1,approved_by=$2 WHERE id=$3",
-            [status, action === "approve" ? req.actor.id : null, doc],
+            [status, null, doc],
           );
           await audit(c, company, req.actor.id, action, "document", doc, d, {
             status,
@@ -639,17 +671,27 @@ export function registerRoutes(app: Express) {
         ),
         to = day.parse(req.query.to || new Date().toISOString().slice(0, 10));
       if (from > to) fail("Start date must precede end date");
+      if (req.query.project !== undefined)
+        fail("Project reporting is no longer available", 410);
       const result = await reports(
         pool,
         id(req.params.company),
         from,
         to,
-        req.query.project ? id(req.query.project) : null,
+        null,
       );
+      const {
+        byProject,
+        byEmployee,
+        outstandingAdvances,
+        summary,
+        ...financialReports
+      } = result;
+      const { advances, ...financialSummary } = summary;
       res.json(
         req.actor.permissions.includes("reports.view")
-          ? result
-          : { summary: result.summary, cashPosition: result.cashPosition },
+          ? { ...financialReports, summary: financialSummary }
+          : { summary: financialSummary, cashPosition: result.cashPosition },
       );
     }),
   );
@@ -667,210 +709,6 @@ export function registerRoutes(app: Express) {
             ],
           )
         ).rows,
-      ),
-    ),
-  );
-  app.get(
-    "/api/c/:company/assets",
-    requirePermission("transactions.view"),
-    route(async (req, res) =>
-      res.json(
-        (
-          await pool.query(
-            `SELECT a.*,COALESCE((SELECT sum(d.base_amount) FROM documents d WHERE d.related_id=a.document_id AND d.kind='depreciation' AND d.status='posted'),0) depreciated FROM assets a WHERE a.company_id=$1 ORDER BY a.id DESC`,
-            [id(req.params.company)],
-          )
-        ).rows,
-      ),
-    ),
-  );
-  app.post(
-    "/api/c/:company/assets/:id/depreciate",
-    requirePermission("accounting.manage"),
-    route(async (req, res) =>
-      res.json(
-        await transaction(async (c) => {
-          const company = id(req.params.company),
-            date = day.parse(req.body.date);
-          await c.query("SELECT id FROM companies ORDER BY id FOR UPDATE");
-          const co = (
-            await c.query("SELECT * FROM companies WHERE id=$1", [company])
-          ).rows[0];
-          if (co.locked_through && date <= co.locked_through)
-            fail("Period is locked");
-          const a =
-            (
-              await c.query(
-                "SELECT * FROM assets WHERE id=$1 AND company_id=$2 AND active FOR UPDATE",
-                [id(req.params.id), company],
-              )
-            ).rows[0] ?? fail("Asset not found");
-          if (date < a.acquired) fail("Depreciation date precedes acquisition");
-          const runs = (
-            await c.query(
-              "SELECT date,base_amount FROM documents WHERE related_id=$1 AND kind='depreciation' AND status='posted'",
-              [a.document_id],
-            )
-          ).rows;
-          if (runs.some((r) => r.date.slice(0, 7) === date.slice(0, 7)))
-            fail("Depreciation already posted for this month");
-          const months =
-            (Number(date.slice(0, 4)) - Number(a.acquired.slice(0, 4))) * 12 +
-            Number(date.slice(5, 7)) -
-            Number(a.acquired.slice(5, 7)) +
-            1;
-          if (runs.length >= months)
-            fail("No additional depreciation is due by this date");
-          if (runs.some((r) => r.date > date))
-            fail(
-              "Depreciation cannot precede a later posted depreciation period",
-            );
-          const depreciated = runs.reduce(
-            (s, r) => s.plus(r.base_amount),
-            new Decimal(0),
-          );
-          const remaining = new Decimal(a.cost)
-            .minus(a.salvage)
-            .minus(depreciated);
-          if (remaining.lte(0)) fail("Asset is fully depreciated");
-          const target = new Decimal(a.cost)
-            .minus(a.salvage)
-            .mul(Math.min(months, a.useful_life))
-            .div(a.useful_life)
-            .toDecimalPlaces(2);
-          const amount = value(target.minus(depreciated));
-          if (new Decimal(amount).lte(0))
-            fail("No additional depreciation is due by this date");
-          const original = (
-            await c.query("SELECT project_id FROM documents WHERE id=$1", [
-              a.document_id,
-            ])
-          ).rows[0];
-          const d = await createDocument(c, company, req.actor.id, {
-            kind: "depreciation",
-            date,
-            amount,
-            description: `Monthly depreciation — ${a.name}`,
-            relatedId: a.document_id,
-            projectId: original.project_id,
-          });
-          const jid = (
-            await c.query(
-              "INSERT INTO journals(company_id,document_id,date) VALUES($1,$2,$3) RETURNING id",
-              [company, d.id, date],
-            )
-          ).rows[0].id;
-          for (const [purpose, debit, credit] of [
-            ["depreciation", amount, "0"],
-            ["accum_depreciation", "0", amount],
-          ])
-            await c.query(
-              "INSERT INTO journal_lines(journal_id,company_id,account_id,debit,credit,currency,project_id) SELECT $1,$2,id,$3,$4,'PKR',$6 FROM accounts WHERE company_id=$2 AND purpose=$5",
-              [jid, company, debit, credit, purpose, original.project_id],
-            );
-          await c.query(
-            "UPDATE documents SET status='posted',posted_at=now() WHERE id=$1",
-            [d.id],
-          );
-          await audit(
-            c,
-            company,
-            req.actor.id,
-            "depreciate",
-            "asset",
-            a.id,
-            null,
-            { documentId: d.id, amount, date },
-          );
-          return d;
-        }),
-      ),
-    ),
-  );
-  app.get(
-    "/api/c/:company/reconciliation",
-    requirePermission("accounting.manage"),
-    route(async (req, res) =>
-      res.json(
-        (
-          await pool.query(
-            "SELECT l.*,a.name,j.date,d.description,rl.reconciliation_id FROM journal_lines l JOIN accounts a ON a.id=l.account_id JOIN journals j ON j.id=l.journal_id JOIN documents d ON d.id=j.document_id LEFT JOIN reconciliation_lines rl ON rl.line_id=l.id WHERE l.company_id=$1 AND a.purpose='bank' ORDER BY j.date,l.id",
-            [id(req.params.company)],
-          )
-        ).rows,
-      ),
-    ),
-  );
-  app.post(
-    "/api/c/:company/reconciliation",
-    requirePermission("accounting.manage"),
-    route(async (req, res) =>
-      res.json(
-        await transaction(async (c) => {
-          const d = z
-              .object({
-                accountId: z.number().int().positive(),
-                date: day,
-                balance: z.string().regex(/^-?\d+(\.\d{1,2})?$/),
-                lineIds: z.array(z.number().int().positive()).min(1),
-              })
-              .parse(req.body),
-            company = id(req.params.company);
-          await c.query("SELECT id FROM companies WHERE id=$1 FOR UPDATE", [
-            company,
-          ]);
-          const a =
-            (
-              await c.query(
-                "SELECT * FROM accounts WHERE id=$1 AND company_id=$2 AND purpose='bank'",
-                [d.accountId, company],
-              )
-            ).rows[0] ?? fail("Bank account not found");
-          const lines = (
-            await c.query(
-              "SELECT l.* FROM journal_lines l JOIN journals j ON j.id=l.journal_id LEFT JOIN reconciliation_lines r ON r.line_id=l.id WHERE l.id=ANY($1::int[]) AND l.account_id=$2 AND l.company_id=$3 AND j.date<=$4 AND r.line_id IS NULL",
-              [d.lineIds, a.id, company, d.date],
-            )
-          ).rows;
-          if (lines.length !== d.lineIds.length)
-            fail("Some selected lines are unavailable or already reconciled");
-          const prior = (
-            await c.query(
-              "SELECT COALESCE(sum(l.foreign_amount),0) total FROM journal_lines l JOIN reconciliation_lines r ON r.line_id=l.id WHERE l.account_id=$1",
-              [a.id],
-            )
-          ).rows[0].total;
-          if (
-            !lines
-              .reduce((s, l) => s.plus(l.foreign_amount), new Decimal(prior))
-              .eq(d.balance)
-          )
-            fail(
-              "Selected cleared transactions do not match the statement balance",
-            );
-          const row = (
-            await c.query(
-              "INSERT INTO reconciliations(company_id,account_id,statement_date,statement_balance,created_by) VALUES($1,$2,$3,$4,$5) RETURNING *",
-              [company, a.id, d.date, d.balance, req.actor.id],
-            )
-          ).rows[0];
-          for (const line of lines)
-            await c.query("INSERT INTO reconciliation_lines VALUES($1,$2)", [
-              row.id,
-              line.id,
-            ]);
-          await audit(
-            c,
-            company,
-            req.actor.id,
-            "reconcile",
-            "bank",
-            a.id,
-            null,
-            row,
-          );
-          return row;
-        }),
       ),
     ),
   );
@@ -1100,7 +938,9 @@ export function registerRoutes(app: Express) {
           password: z.string().min(12).max(200).optional(),
           role_id: z.number().int().positive(),
           active: z.boolean(),
-          overrides: z.partialRecord(z.enum(permissionKeys), z.boolean()).default({}),
+          overrides: z
+            .partialRecord(z.enum(permissionKeys), z.boolean())
+            .default({}),
           companies: z.array(z.number().int().positive()),
           data_scope: z.enum(["own", "company"]).nullable().optional(),
           employee_links: z
