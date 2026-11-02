@@ -1320,6 +1320,12 @@ tr.clickable:hover {
   grid-template-columns: 1fr 1fr;
   gap: 17px;
 }
+.form-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
 .wide {
   grid-column: 1/-1;
 }
@@ -1496,6 +1502,46 @@ tr.clickable:hover {
   margin-top: 4px;
   font-size: 9px;
   color: var(--muted);
+}
+.transaction-attachments {
+  border-top: 1px solid var(--border);
+  padding-top: 17px;
+}
+.transaction-attachments input[type="file"] {
+  padding: 10px;
+}
+.transaction-attachments > .negative {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.queued-attachments {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.queued-attachments li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.queued-attachments li > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.queued-attachments small {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
 }
 .reversal-panel {
   background: #fff8f3;

@@ -219,16 +219,18 @@ function Modal({
   children,
   onClose,
   wide = false,
+  busy = false,
 }: {
   title: string;
   description?: string;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
+  busy?: boolean;
 }) {
   useEffect(() => {
     const close = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !busy) onClose();
     };
     document.addEventListener("keydown", close);
     const old = document.body.style.overflow;
@@ -237,9 +239,9 @@ function Modal({
       document.removeEventListener("keydown", close);
       document.body.style.overflow = old;
     };
-  }, [onClose]);
+  }, [onClose, busy]);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={() => !busy && onClose()}>
       <section
         className={"modal" + (wide ? " modal-wide" : "")}
         role="dialog"
@@ -257,6 +259,7 @@ function Modal({
             className="icon-button"
             aria-label="Close dialog"
             onClick={onClose}
+            disabled={busy}
           >
             <X size={20} />
           </button>
@@ -272,12 +275,16 @@ function FormShell({
   onClose,
   saveLabel = "Save",
   wide = false,
+  lockWhileSaving = false,
+  onBusyChange,
 }: {
   children: ReactNode;
   onSave: () => Promise<void>;
   onClose: () => void;
   saveLabel?: string;
   wide?: boolean;
+  lockWhileSaving?: boolean;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -285,18 +292,30 @@ function FormShell({
     <form
       onSubmit={async (e) => {
         e.preventDefault();
+        if (busy) return;
         setError("");
         setBusy(true);
+        onBusyChange?.(true);
         try {
           await onSave();
         } catch (e) {
           setError((e as Error).message);
         } finally {
           setBusy(false);
+          onBusyChange?.(false);
         }
       }}
     >
-      <div className={wide ? "form-grid" : "form-stack"}>{children}</div>
+      {lockWhileSaving ? (
+        <fieldset
+          disabled={busy}
+          className={`form-fields ${wide ? "form-grid" : "form-stack"}`}
+        >
+          {children}
+        </fieldset>
+      ) : (
+        <div className={wide ? "form-grid" : "form-stack"}>{children}</div>
+      )}
       {error && (
         <div className="error" role="alert">
           <CircleAlert size={17} />
@@ -304,7 +323,12 @@ function FormShell({
         </div>
       )}
       <div className="modal-footer">
-        <button type="button" className="button secondary" onClick={onClose}>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={onClose}
+          disabled={lockWhileSaving && busy}
+        >
           Cancel
         </button>
         <button className="button" disabled={busy}>
@@ -958,12 +982,35 @@ export default function App() {
           kind={modal.kind}
           prefill={modal.prefill}
           onClose={closeModal}
-          onSave={async (d) => {
+          onSave={async (d, files) => {
             const doc = await api(
               base + "/documents" + (modal.editId ? "/" + modal.editId : ""),
               modal.editId ? "PATCH" : "POST",
               d,
             );
+            // Remember the saved record before uploading so retrying cannot
+            // create a second transaction if an attachment request fails.
+            setModal((current) =>
+              current?.type === "transaction"
+                ? { ...current, editId: doc.id }
+                : current,
+            );
+            reload();
+            if (files.length) {
+              const body = new FormData();
+              files.forEach((file) => body.append("files", file));
+              try {
+                await api(
+                  `${base}/documents/${doc.id}/attachments`,
+                  "POST",
+                  body,
+                );
+              } catch (error) {
+                throw new Error(
+                  `Transaction #${doc.id} was saved as pending, but attachments could not be uploaded. Your selected files are still here. Retry Save pending, or close and attach them later. ${(error as Error).message}`,
+                );
+              }
+            }
             closeModal();
             reload();
             setSelected(doc);
@@ -2315,7 +2362,7 @@ function TransactionModal({
   kind: string;
   prefill?: Row;
   onClose: () => void;
-  onSave: (d: Row) => Promise<void>;
+  onSave: (d: Row, files: File[]) => Promise<void>;
 }) {
   const [form, setForm] = useState<Row>({
       kind,
@@ -2329,7 +2376,25 @@ function TransactionModal({
       ...prefill,
     }),
     [other, setOther] = useState<Data | null>(null),
-    [otherError, setOtherError] = useState("");
+    [otherError, setOtherError] = useState(""),
+    [files, setFiles] = useState<File[]>([]),
+    [saving, setSaving] = useState(false);
+  const attachmentError =
+    files.length > 5
+      ? "Choose up to 5 attachments. Remove extra files before saving."
+      : files.find(
+            (file) =>
+              ![
+                "application/pdf",
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+              ].includes(file.type),
+          )
+        ? "Only PDF, JPG, PNG, and WebP attachments are supported. Remove unsupported files before saving."
+        : files.some((file) => file.size > 20 * 1024 * 1024)
+          ? "Each attachment must be 20 MB or smaller. Remove larger files before saving."
+          : "";
   const set = (key: string, v: any) => setForm((f) => ({ ...f, [key]: v }));
   const k = form.kind;
   const ownData = user.dataScope === "own";
@@ -2424,12 +2489,16 @@ function TransactionModal({
       description="Describe the business action. The accounting entries are created automatically."
       onClose={onClose}
       wide
+      busy={saving}
     >
       <FormShell
         onClose={onClose}
         saveLabel="Save pending"
         wide
+        lockWhileSaving
+        onBusyChange={setSaving}
         onSave={() => {
+          if (attachmentError) throw new Error(attachmentError);
           const payload: Row = {
             kind: k,
             date: form.date,
@@ -2457,7 +2526,7 @@ function TransactionModal({
               targetAccount.currency === "PKR" ? "1" : form.targetRate;
           }
           if (k === "opening") payload.openingSide = form.openingSide;
-          return onSave(payload);
+          return onSave(payload, files);
         }}
       >
         <Field label="Business action" wide>
@@ -2765,11 +2834,78 @@ function TransactionModal({
             placeholder="What is this transaction for?"
           />
         </Field>
+        <div className="transaction-attachments wide">
+          <Field
+            label="Attachments (optional)"
+            hint="Add receipts, invoices, or payment screenshots. Up to 5 files, 20 MB each. PDF, JPG, PNG, or WebP."
+          >
+            <input
+              type="file"
+              multiple
+              accept="application/pdf,image/jpeg,image/png,image/webp"
+              onChange={(event) => {
+                const selected = Array.from(event.target.files || []);
+                setFiles((current) => {
+                  const next = [...current];
+                  selected.forEach((file) => {
+                    if (
+                      !next.some(
+                        (existing) =>
+                          existing.name === file.name &&
+                          existing.size === file.size &&
+                          existing.lastModified === file.lastModified &&
+                          existing.type === file.type,
+                      )
+                    )
+                      next.push(file);
+                  });
+                  return next;
+                });
+                event.target.value = "";
+              }}
+            />
+          </Field>
+          {files.length > 0 && (
+            <ul
+              className="queued-attachments"
+              aria-label="Selected attachments"
+            >
+              {files.map((file, index) => (
+                <li
+                  key={`${file.name}-${file.size}-${file.lastModified}-${file.type}`}
+                >
+                  <Paperclip size={16} />
+                  <span>
+                    {file.name}
+                    <small>{num(file.size / 1024)} KB</small>
+                  </span>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`Remove ${file.name}`}
+                    onClick={() =>
+                      setFiles((current) =>
+                        current.filter((_, i) => i !== index),
+                      )
+                    }
+                  >
+                    <X size={16} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {attachmentError && (
+            <p className="negative" role="alert">
+              {attachmentError}
+            </p>
+          )}
+        </div>
         <div className="info wide">
           <FileText size={18} />
           <span>
-            This saves a pending transaction. Attach receipts, then use Post
-            transaction to update balances if you have posting permission.
+            This saves a pending transaction with your selected attachments. Use
+            Post transaction to update balances if you have posting permission.
           </span>
         </div>
       </FormShell>
