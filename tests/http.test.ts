@@ -559,6 +559,12 @@ describe(
     });
 
     test("uploads reach their handler and downloads retain document access checks", async () => {
+      assert.equal(
+        (
+          await ok(`/api/c/${company}/documents`, { cookie: employeeCookie })
+        ).find((d: any) => d.id === employeeDocument).attachment_count,
+        0,
+      );
       const form = new FormData();
       form.append(
         "files",
@@ -577,6 +583,12 @@ describe(
         { cookie: employeeCookie },
       );
       assert.equal(attachments.length, 1);
+      assert.equal(
+        (
+          await ok(`/api/c/${company}/documents`, { cookie: employeeCookie })
+        ).find((d: any) => d.id === employeeDocument).attachment_count,
+        1,
+      );
       const download = await request(
         `/api/c/${company}/documents/${employeeDocument}/attachments/${attachments[0].id}`,
         { cookie: employeeCookie },
@@ -621,6 +633,16 @@ describe(
           body: {},
         });
       assert.equal((await action(own.id, "post")).response.status, 403);
+      assert.equal(
+        (
+          await request(`/api/c/${company}/documents/bulk-post`, {
+            method: "POST",
+            cookie,
+            body: { ids: [own.id, peer.id] },
+          })
+        ).response.status,
+        403,
+      );
       const setPermission = (enabled: boolean) =>
         ok("/api/admin/users", {
           method: "POST",
@@ -647,8 +669,36 @@ describe(
         ).response.status,
         400,
       );
-      for (const doc of [own, peer])
-        assert.equal((await action(doc.id, "post")).response.status, 200);
+      const adjustment = await createPending({
+        ...expense,
+        kind: "adjustment",
+        targetId: head,
+      });
+      const bulk = await ok(`/api/c/${company}/documents/bulk-post`, {
+        method: "POST",
+        cookie,
+        body: { ids: [adjustment.id, own.id, peer.id] },
+      });
+      assert.deepEqual(
+        bulk.results.map((r: any) => [r.id, r.status]),
+        [
+          [adjustment.id, "failed"],
+          [own.id, "posted"],
+          [peer.id, "posted"],
+        ],
+      );
+      assert.equal(bulk.posted, 2);
+      assert.equal(bulk.failed, 1);
+      assert.equal(
+        (
+          await control.query(
+            `SELECT status FROM ${schema}.documents WHERE id=$1`,
+            [adjustment.id],
+          )
+        ).rows[0].status,
+        "pending",
+        "Posting permission alone cannot post accounting adjustments",
+      );
       const pending = await ok(`/api/c/${company}/documents`, {
         method: "POST",
         cookie,
@@ -656,6 +706,16 @@ describe(
       });
       await setPermission(false);
       assert.equal((await action(pending.id, "post")).response.status, 403);
+      assert.equal(
+        (
+          await request(`/api/c/${company}/documents/bulk-post`, {
+            method: "POST",
+            cookie,
+            body: { ids: [pending.id] },
+          })
+        ).response.status,
+        403,
+      );
       assert.equal(
         (
           await request(`/api/c/${otherCompany}/documents/${own.id}/post`, {
@@ -1113,6 +1173,56 @@ describe(
       assert.equal(ownExpense.can_manage, true);
       assert.equal(ownExpense.status, "posted");
       assert.equal(ownExpense.approved_by, null);
+      const bulkExpense = await create(
+        {
+          kind: "expense",
+          sourceId: cash.id,
+          categoryId: officeCategory.id,
+          amount: "10",
+        },
+        ownCookie,
+      );
+      const bulk = await ok(`${prefix}/documents/bulk-post`, {
+        method: "POST",
+        cookie: ownCookie,
+        body: {
+          ids: [
+            salary.id,
+            income.id,
+            financeDraft.id,
+            oldDraft.id,
+            bulkExpense.id,
+          ],
+        },
+      });
+      assert.equal(bulk.posted, 1);
+      assert.equal(bulk.failed, 4);
+      assert.equal(bulk.alreadyPosted, 0);
+      assert.deepEqual(
+        bulk.results.map((r: any) => [r.id, r.status]),
+        [
+          [salary.id, "failed"],
+          [income.id, "failed"],
+          [financeDraft.id, "failed"],
+          [oldDraft.id, "failed"],
+          [bulkExpense.id, "posted"],
+        ],
+      );
+      assert.doesNotMatch(
+        JSON.stringify(bulk),
+        /PRIVATE SALARY DETAILS|PRIVATE CLIENT INCOME/,
+      );
+      for (const row of bulk.results.slice(0, 3))
+        assert.equal(row.message, "Transaction not found or unavailable");
+      assert.deepEqual(
+        (
+          await control.query(
+            `SELECT status FROM ${schema}.documents WHERE id=ANY($1::integer[]) ORDER BY id`,
+            [[financeDraft.id, oldDraft.id]],
+          )
+        ).rows.map((r: any) => r.status),
+        ["pending", "pending"],
+      );
       await posted(
         {
           kind: "transfer",
@@ -1220,6 +1330,314 @@ describe(
         ).response.status,
         401,
       );
+    });
+
+    test("bulk posting rejects invalid selections before changing documents", async () => {
+      const document = await createPending({
+        kind: "expense",
+        date: "2026-10-03",
+        amount: "20",
+        description: "Bulk validation fixture",
+        sourceId: bank,
+        headId: head,
+      });
+      for (const body of [
+        {},
+        { ids: [] },
+        { ids: [document.id, document.id] },
+        { ids: [document.id, 0] },
+        { ids: [document.id, -1] },
+        { ids: [document.id, 1.5] },
+        { ids: [document.id, String(document.id)] },
+        { ids: [document.id, Number.MAX_SAFE_INTEGER + 1] },
+        { ids: Array.from({ length: 101 }, (_, i) => i + 1) },
+      ]) {
+        const result = await request(`/api/c/${company}/documents/bulk-post`, {
+          method: "POST",
+          cookie: adminCookie,
+          body,
+        });
+        assert.equal(result.response.status, 400, JSON.stringify(body));
+      }
+      assert.equal(
+        (
+          await control.query(
+            `SELECT status FROM ${schema}.documents WHERE id=$1`,
+            [document.id],
+          )
+        ).rows[0].status,
+        "pending",
+      );
+      assert.equal(
+        (
+          await control.query(
+            `SELECT count(*) FROM ${schema}.journals WHERE document_id=$1`,
+            [document.id],
+          )
+        ).rows[0].count,
+        "0",
+      );
+    });
+
+    test("concurrent bulk posting and retries create one balanced journal and audit per document", async () => {
+      const documents = [];
+      for (const amount of ["35", "45"])
+        documents.push(
+          await createPending({
+            kind: "expense",
+            date: "2026-10-03",
+            amount,
+            description: "Bulk retry fixture",
+            sourceId: bank,
+            headId: head,
+          }),
+        );
+      const ids = documents.map((d) => d.id).reverse();
+      const send = () =>
+        ok(`/api/c/${company}/documents/bulk-post`, {
+          method: "POST",
+          body: { ids },
+        });
+      const concurrent = await Promise.all([send(), send()]);
+      assert.equal(
+        concurrent.reduce((n, r) => n + r.posted, 0),
+        2,
+      );
+      assert.equal(
+        concurrent.reduce((n, r) => n + r.alreadyPosted, 0),
+        2,
+      );
+      for (const result of concurrent) {
+        assert.equal(result.failed, 0);
+        assert.deepEqual(
+          result.results.map((r: any) => r.id),
+          ids,
+        );
+      }
+      const retry = await send();
+      assert.equal(retry.posted, 0);
+      assert.equal(retry.alreadyPosted, 2);
+      assert.equal(retry.failed, 0);
+      assert.deepEqual(
+        retry.results.map((r: any) => r.status),
+        ["already_posted", "already_posted"],
+      );
+      const journals = await control.query(
+        `SELECT j.document_id,count(l.id)::integer lines,sum(l.debit)::text debit,sum(l.credit)::text credit
+         FROM ${schema}.journals j JOIN ${schema}.journal_lines l ON l.journal_id=j.id
+         WHERE j.document_id=ANY($1::integer[]) GROUP BY j.id ORDER BY j.document_id`,
+        [ids],
+      );
+      assert.equal(journals.rows.length, 2);
+      for (const row of journals.rows) {
+        assert.equal(row.lines, 2);
+        assert.equal(row.debit, row.credit);
+        assert.ok(Number(row.debit) > 0);
+      }
+      const audits = await control.query(
+        `SELECT entity_id,count(*)::integer count FROM ${schema}.audit
+         WHERE entity='document' AND action='post' AND entity_id=ANY($1::integer[]) GROUP BY entity_id`,
+        [ids],
+      );
+      assert.equal(audits.rows.length, 2);
+      assert.ok(audits.rows.every((r: any) => r.count === 1));
+    });
+
+    test("bulk posting isolates locked, invalid, retired, cancelled and foreign-company failures", async () => {
+      const isolated = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Bulk partial failure company" },
+      });
+      const prefix = `/api/c/${isolated.id}`;
+      const setup = await ok(`${prefix}/bootstrap`);
+      const cashAccount = await ok(`${prefix}/accounts`, {
+        method: "POST",
+        body: {
+          code: "BULK-BANK",
+          name: "Bulk bank",
+          type: "asset",
+          purpose: "bank",
+        },
+      });
+      const create = (body: any) =>
+        ok(`${prefix}/documents`, {
+          method: "POST",
+          body: {
+            date: "2026-10-10",
+            amount: "100",
+            description: "Bulk partial failure fixture",
+            ...body,
+          },
+        });
+      const valid = await create({ kind: "opening", targetId: cashAccount.id });
+      const locked = await create({
+        kind: "opening",
+        targetId: cashAccount.id,
+        date: "2026-10-01",
+      });
+      const invalid = await create({
+        kind: "expense",
+        sourceId: cashAccount.id,
+      });
+      const cancelled = await create({
+        kind: "expense",
+        sourceId: cashAccount.id,
+        headId: setup.accounts.find((a: any) => a.purpose === "office").id,
+      });
+      await ok(`${prefix}/documents/${cancelled.id}/cancel`, {
+        method: "POST",
+        body: {},
+      });
+      const retired = (
+        await control.query(
+          `INSERT INTO ${schema}.documents(company_id,kind,date,amount,currency,rate,base_amount,description,status,created_by,source_id)
+         VALUES($1,'asset_purchase','2026-10-10',10,'PKR',1,10,'Retired bulk fixture','pending',$2,$3) RETURNING id`,
+          [
+            isolated.id,
+            initialAdmin.users.find((u: any) => u.username === "admin").id,
+            cashAccount.id,
+          ],
+        )
+      ).rows[0];
+      const foreign = await createPending({
+        kind: "expense",
+        date: "2026-10-03",
+        amount: "20",
+        description: "Other company selection",
+        sourceId: bank,
+        headId: head,
+      });
+      await ok(`/api/companies/${isolated.id}`, {
+        method: "PATCH",
+        body: {
+          name: isolated.name,
+          approvals: false,
+          locked_through: "2026-10-05",
+        },
+      });
+      const ids = [
+        invalid.id,
+        locked.id,
+        valid.id,
+        cancelled.id,
+        retired.id,
+        foreign.id,
+        Number.MAX_SAFE_INTEGER,
+      ];
+      const bulk = await ok(`${prefix}/documents/bulk-post`, {
+        method: "POST",
+        body: { ids },
+      });
+      assert.equal(bulk.posted, 1);
+      assert.equal(bulk.alreadyPosted, 0);
+      assert.equal(bulk.failed, 6);
+      assert.deepEqual(
+        bulk.results.map((r: any) => [r.id, r.status]),
+        ids.map((id) => [id, id === valid.id ? "posted" : "failed"]),
+      );
+      assert.equal(
+        bulk.results[5].message,
+        "Transaction not found or unavailable",
+      );
+      assert.equal(
+        bulk.results[6].message,
+        "Transaction not found or unavailable",
+      );
+      const failedIds = [invalid.id, locked.id, retired.id, foreign.id];
+      assert.ok(
+        (
+          await control.query(
+            `SELECT status FROM ${schema}.documents WHERE id=ANY($1::integer[])`,
+            [failedIds],
+          )
+        ).rows.every((r: any) => r.status === "pending"),
+      );
+      assert.equal(
+        (
+          await control.query(
+            `SELECT count(*) FROM ${schema}.journals WHERE document_id=ANY($1::integer[])`,
+            [[...failedIds, cancelled.id]],
+          )
+        ).rows[0].count,
+        "0",
+      );
+      assert.equal(
+        (
+          await control.query(
+            `SELECT count(*) FROM ${schema}.audit WHERE entity='document' AND action='post' AND entity_id=ANY($1::integer[])`,
+            [[...failedIds, cancelled.id]],
+          )
+        ).rows[0].count,
+        "0",
+      );
+    });
+
+    test("bulk posting processes foreign-currency activity chronologically regardless of selection order", async () => {
+      const usd = await ok(`/api/c/${company}/accounts`, {
+        method: "POST",
+        body: {
+          code: "BULK-USD",
+          name: "Bulk USD bank",
+          type: "asset",
+          purpose: "bank",
+          currency: "USD",
+        },
+      });
+      const create = (body: any) =>
+        createPending({
+          currency: "USD",
+          rate: "280",
+          description: "Bulk currency ordering fixture",
+          ...body,
+        });
+      const later = await create({
+        kind: "expense",
+        date: "2026-11-03",
+        amount: "10",
+        sourceId: usd.id,
+        headId: head,
+      });
+      const earlier = await create({
+        kind: "expense",
+        date: "2026-11-02",
+        amount: "20",
+        sourceId: usd.id,
+        headId: head,
+      });
+      const opening = await create({
+        kind: "opening",
+        date: "2026-11-01",
+        amount: "100",
+        targetId: usd.id,
+      });
+      const ids = [later.id, opening.id, earlier.id];
+      const bulk = await ok(`/api/c/${company}/documents/bulk-post`, {
+        method: "POST",
+        body: { ids },
+      });
+      assert.equal(bulk.posted, 3, JSON.stringify(bulk));
+      assert.equal(bulk.failed, 0);
+      assert.deepEqual(
+        bulk.results.map((r: any) => r.id),
+        ids,
+      );
+      assert.deepEqual(
+        (
+          await control.query(
+            `SELECT document_id FROM ${schema}.journals WHERE document_id=ANY($1::integer[]) ORDER BY id`,
+            [ids],
+          )
+        ).rows.map((r: any) => r.document_id),
+        [opening.id, earlier.id, later.id],
+      );
+      const balance = (
+        await control.query(
+          `SELECT sum(foreign_amount)::text nominal,sum(debit-credit)::text base FROM ${schema}.journal_lines WHERE account_id=$1`,
+          [usd.id],
+        )
+      ).rows[0];
+      assert.equal(Number(balance.nominal), 70);
+      assert.equal(Number(balance.base), 19600);
     });
 
     test("concurrent posting is idempotent and creates one journal", async () => {

@@ -38,6 +38,7 @@ import {
   RefreshCw,
   SlidersHorizontal,
 } from "lucide-react";
+import { Transactions } from "./Transactions";
 
 type Row = Record<string, any>;
 type User = {
@@ -858,12 +859,23 @@ export default function App() {
               )}
               {page === "transactions" && (
                 <Transactions
+                  key={`${company}-${user.id}`}
                   rows={filteredDocs}
                   query={query}
                   setQuery={setQuery}
                   onSelect={setSelected}
                   can={can}
-                  onNew={openTransaction}
+                  data={data}
+                  companies={companies}
+                  user={user}
+                  companyId={company}
+                  loading={loading}
+                  base={base}
+                  onReload={reload}
+                  request={api}
+                  exportRows={exportCSV}
+                  kindLabels={kindLabels}
+                  ConfirmationModal={Modal}
                 />
               )}
               {["accounts", "chart", "categories"].includes(page) && (
@@ -1621,104 +1633,6 @@ function TransactionTable({
     />
   );
 }
-function Transactions({
-  rows,
-  query,
-  setQuery,
-  onSelect,
-  can,
-  onNew,
-}: {
-  rows: Row[];
-  query: string;
-  setQuery: (v: string) => void;
-  onSelect: (d: Row) => void;
-  can: (p: string) => boolean;
-  onNew: (k?: string) => void;
-}) {
-  const [status, setStatus] = useState("pending"),
-    [kind, setKind] = useState("");
-  const filtered = rows.filter(
-    (d) =>
-      (status === "all" || d.status === status) && (!kind || d.kind === kind),
-  );
-  return (
-    <section className="card">
-      <div className="tabs">
-        {["pending", "posted", "all"].map((s) => (
-          <button
-            key={s}
-            className={status === s ? "active" : ""}
-            onClick={() => setStatus(s)}
-          >
-            {s === "all" ? "All history" : title(s)}
-            <span>
-              {rows.filter((d) => s === "all" || d.status === s).length}
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className="table-toolbar">
-        <div className="search-input">
-          <Search size={17} />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search transactions, references, contacts…"
-          />
-        </div>
-        <select
-          aria-label="Transaction type"
-          value={kind}
-          onChange={(e) => setKind(e.target.value)}
-        >
-          <option value="">All transaction types</option>
-          {activeKindLabels.map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
-            </option>
-          ))}
-        </select>
-        <button
-          className="button secondary compact"
-          onClick={() => exportCSV("transactions", filtered)}
-          disabled={!filtered.length}
-        >
-          <Download size={16} />
-          Export
-        </button>
-      </div>
-      {filtered.length ? (
-        <TransactionTable rows={filtered} onSelect={onSelect} />
-      ) : (
-        <Empty
-          title={
-            query || kind
-              ? "No matching transactions"
-              : status === "pending"
-                ? "No pending transactions"
-                : status === "posted"
-                  ? "No posted transactions"
-                  : "No transactions yet"
-          }
-          text={
-            query || kind
-              ? "Try a different search or transaction type."
-              : status === "pending"
-                ? "New transactions appear here until they are posted."
-                : status === "posted"
-                  ? "Post a pending transaction to include it in account balances."
-                  : "Record your first business action to start building your financial history."
-          }
-        />
-      )}
-      <div className="table-bottom">
-        Showing {filtered.length} transaction{filtered.length !== 1 ? "s" : ""}
-      </div>
-    </section>
-  );
-}
-
 function MasterPage({
   page,
   ownData = false,

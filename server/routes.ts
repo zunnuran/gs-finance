@@ -64,6 +64,47 @@ const retiredDocumentSql = `(
     OR EXISTS (SELECT 1 FROM assets legacy_asset WHERE legacy_asset.document_id=d.id)
   ))
 )`;
+async function postAccessibleDocument(
+  c: Connection,
+  actor: Request["actor"],
+  company: number,
+  documentId: number,
+) {
+  if (!actor.permissions.includes("transactions.post"))
+    fail("Permission denied", 403);
+  // Match the lock order used for reversals and inter-company posting.
+  await c.query("SELECT id FROM companies ORDER BY id FOR UPDATE");
+  await assertOwnDocument(c, actor, company, documentId, true);
+  const current = (
+    await c.query(
+      "SELECT * FROM documents WHERE id=$1 AND company_id=$2 FOR UPDATE",
+      [documentId, company],
+    )
+  ).rows[0];
+  if (!current) {
+    if (actor.dataScope === "own") denyScope();
+    fail("Transaction not found");
+  }
+  const input = documentInput(current);
+  if (actor.dataScope === "own")
+    // Historical project links do not expand access; new links remain disabled.
+    await assertOwnInput(c, actor, company, { ...input, projectId: null });
+  if (
+    current.other_company_id &&
+    !(await canAccess(actor, current.other_company_id))
+  )
+    fail("Receiving company access required");
+  if (
+    ["opening", "adjustment", "depreciation"].includes(current.kind) &&
+    !actor.permissions.includes("accounting.manage")
+  )
+    fail("Accounting permission is required");
+  await assertActiveDocument(c, company, input, { allowLegacyProject: true });
+  return {
+    document: await postDocument(c, company, actor.id, documentId),
+    alreadyPosted: current.status === "posted",
+  };
+}
 // Explicit next() wrapper, since successful guards must continue routing.
 const scoped: RequestHandler = (req, res, next) => {
   Promise.resolve()
@@ -407,6 +448,7 @@ export function registerRoutes(app: Express) {
         const docs = (
           await pool.query(
             `SELECT d.*,${retiredDocumentSql} retired,false inbound,ct.name contact_name,p.name project_name,u.full_name creator,
+          (SELECT count(*)::integer FROM attachments attachment WHERE attachment.document_id=d.id) attachment_count,
           COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,
           COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base
           FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by
@@ -420,7 +462,9 @@ export function registerRoutes(app: Express) {
       res.json(
         (
           await pool.query(
-            `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by WHERE (d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND ($2::integer IS NULL OR d.created_by=$2) ORDER BY d.date DESC,d.id DESC`,
+            `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,
+            CASE WHEN d.company_id=$1 THEN (SELECT count(*)::integer FROM attachments attachment WHERE attachment.document_id=d.id) ELSE 0 END attachment_count,
+            COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by WHERE (d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND ($2::integer IS NULL OR d.created_by=$2) ORDER BY d.date DESC,d.id DESC`,
             [company, null],
           )
         ).rows,
@@ -558,6 +602,82 @@ export function registerRoutes(app: Express) {
     ),
   );
   app.post(
+    "/api/c/:company/documents/bulk-post",
+    requirePermission("transactions.post"),
+    route(async (req, res) => {
+      const company = id(req.params.company);
+      const { ids } = z
+        .object({
+          ids: z
+            .array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+            .min(1)
+            .max(100)
+            .refine(
+              (values) => new Set(values).size === values.length,
+              "Select each transaction only once",
+            ),
+        })
+        .parse(req.body);
+      // Only accessible records participate in chronological ordering. Results
+      // keep request order and never reveal hidden record dates or details.
+      const ordered = (
+        await pool.query(
+          req.actor.dataScope === "own"
+            ? `SELECT d.id FROM documents d WHERE ${ownDocumentWhere} AND d.created_by=$2 AND d.id=ANY($3::bigint[]) ORDER BY d.date,d.id`
+            : "SELECT d.id FROM documents d WHERE d.company_id=$1 AND d.id=ANY($2::bigint[]) ORDER BY d.date,d.id",
+          req.actor.dataScope === "own"
+            ? [company, req.actor.id, ids]
+            : [company, ids],
+        )
+      ).rows;
+      type Result = {
+        id: number;
+        status: "posted" | "already_posted" | "failed";
+        message?: string;
+      };
+      const results = new Map<number, Result>(
+        ids.map((documentId) => [
+          documentId,
+          {
+            id: documentId,
+            status: "failed",
+            message: "Transaction not found or unavailable",
+          },
+        ]),
+      );
+      for (const { id: documentId } of ordered) {
+        try {
+          const posted = await transaction((c) =>
+            postAccessibleDocument(c, req.actor, company, documentId),
+          );
+          results.set(documentId, {
+            id: documentId,
+            status: posted.alreadyPosted ? "already_posted" : "posted",
+          });
+        } catch (error) {
+          const failure = error as { status?: number; message?: string };
+          if (!failure.status || failure.status >= 500) console.error(error);
+          results.set(documentId, {
+            id: documentId,
+            status: "failed",
+            message:
+              failure.status && failure.status < 500
+                ? failure.message || "Transaction could not be posted"
+                : "An unexpected server error occurred. Refresh before retrying.",
+          });
+        }
+      }
+      const response = ids.map((documentId) => results.get(documentId)!);
+      res.json({
+        results: response,
+        posted: response.filter((item) => item.status === "posted").length,
+        alreadyPosted: response.filter((item) => item.status === "already_posted")
+          .length,
+        failed: response.filter((item) => item.status === "failed").length,
+      });
+    }),
+  );
+  app.post(
     "/api/c/:company/documents/:id/:action(submit|approve|reject|cancel|post|reverse)",
     route(async (req, res) => {
       if (["submit", "approve", "reject"].includes(req.params.action))
@@ -577,27 +697,18 @@ export function registerRoutes(app: Express) {
       }[action];
       if (!req.actor.permissions.includes(required))
         return res.status(403).json({ message: "Permission denied" });
+      if (action === "post") {
+        const result = await transaction((c) =>
+          postAccessibleDocument(c, req.actor, company, doc),
+        );
+        return res.json(result.document);
+      }
       res.json(
         await transaction(async (c) => {
-          if (action === "post" || action === "reverse")
+          if (action === "reverse")
             await c.query("SELECT id FROM companies ORDER BY id FOR UPDATE");
           await assertOwnDocument(c, req.actor, company, doc, true);
-          if (req.actor.dataScope === "own" && action === "post") {
-            const current = (
-              await c.query(
-                "SELECT * FROM documents WHERE id=$1 AND company_id=$2 FOR UPDATE",
-                [doc, company],
-              )
-            ).rows[0];
-            if (!current) denyScope();
-            const currentInput = documentInput(current);
-            // Historical project links do not expand access; new links remain disabled.
-            await assertOwnInput(c, req.actor, company, {
-              ...currentInput,
-              projectId: null,
-            });
-          }
-          if (action === "post" || action === "reverse") {
+          if (action === "reverse") {
             // Stable company locks also make two-company posting/reversal atomic without deadlocks.
             const d =
               (
@@ -616,12 +727,6 @@ export function registerRoutes(app: Express) {
               !req.actor.permissions.includes("accounting.manage")
             )
               fail("Accounting permission is required");
-            if (action === "post") {
-              await assertActiveDocument(c, company, documentInput(d), {
-                allowLegacyProject: true,
-              });
-              return postDocument(c, company, req.actor.id, doc);
-            }
             await reverseDocument(
               c,
               company,
