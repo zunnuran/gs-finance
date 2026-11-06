@@ -14,6 +14,15 @@ import {
   Search,
   SlidersHorizontal,
 } from "lucide-react";
+import Decimal from "decimal.js";
+import { SortHeader } from "./SortHeader";
+import {
+  nextSort,
+  sortRows,
+  type SortState,
+  type SortType,
+  type SortValue,
+} from "./tableSort";
 
 type Row = Record<string, any>;
 type Data = {
@@ -38,6 +47,8 @@ type Column = {
   label: string;
   numeric?: boolean;
   value: (row: Row) => string;
+  sortValue?: (row: Row) => SortValue;
+  sortType?: SortType;
 };
 const RETIRED_KINDS = new Set([
   "advance",
@@ -75,6 +86,16 @@ const amount = (value: any) =>
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       }).format(Number(value));
+const outstandingAmount = (row: Row) =>
+  row.status === "posted" &&
+  (["bill", "invoice"].includes(row.kind) ||
+    (row.kind === "asset_purchase" && !row.source_id)) &&
+  !row.inbound
+    ? Decimal.max(
+        0,
+        new Decimal(row.amount).minus(row.allocated || 0),
+      ).toString()
+    : null;
 
 export function Transactions({
   rows,
@@ -119,6 +140,10 @@ export function Transactions({
 }) {
   const [status, setStatus] = useState("pending");
   const [kind, setKind] = useState("");
+  const [sort, setSort] = useState<SortState>({
+    key: "date",
+    direction: "desc",
+  });
   const [selected, setSelected] = useState<number[]>([]);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -156,8 +181,16 @@ export function Transactions({
       id: "id",
       label: "ID",
       value: (r) => `#${String(r.id).padStart(5, "0")}`,
+      sortValue: (r) => r.id,
+      sortType: "number",
     },
-    { id: "date", label: "Date", value: (r) => date(r.date) },
+    {
+      id: "date",
+      label: "Date",
+      value: (r) => date(r.date),
+      sortValue: (r) => r.date,
+      sortType: "date",
+    },
     {
       id: "description",
       label: "Description / notes",
@@ -169,6 +202,8 @@ export function Transactions({
       label: "Amount",
       numeric: true,
       value: (r) => amount(r.amount),
+      sortValue: (r) => r.amount,
+      sortType: "number",
     },
     { id: "currency", label: "Currency", value: (r) => r.currency || "—" },
     {
@@ -205,37 +240,47 @@ export function Transactions({
           : new Intl.NumberFormat("en-PK", { maximumFractionDigits: 8 }).format(
               Number(r.rate),
             ),
+      sortValue: (r) => r.rate,
+      sortType: "number",
     },
     {
       id: "base",
       label: "Amount in PKR",
       numeric: true,
       value: (r) => amount(r.base_amount),
+      sortValue: (r) => r.base_amount,
+      sortType: "number",
     },
     { id: "custodian", label: "Cash custodian", value: custodianName },
-    { id: "due", label: "Due date", value: (r) => date(r.due_date) },
+    {
+      id: "due",
+      label: "Due date",
+      value: (r) => date(r.due_date),
+      sortValue: (r) => r.due_date,
+      sortType: "date",
+    },
     {
       id: "outstanding",
       label: "Outstanding",
       numeric: true,
-      value: (r) =>
-        r.status === "posted" &&
-        (["bill", "invoice"].includes(r.kind) ||
-          (r.kind === "asset_purchase" && !r.source_id)) &&
-        !r.inbound
-          ? amount(Math.max(0, Number(r.amount) - Number(r.allocated || 0)))
-          : "—",
+      value: (r) => amount(outstandingAmount(r)),
+      sortValue: outstandingAmount,
+      sortType: "number",
     },
     { id: "creator", label: "Created by", value: (r) => r.creator || "—" },
     {
       id: "created",
       label: "Created at (PKT)",
       value: (r) => timestamp(r.created_at),
+      sortValue: (r) => r.created_at,
+      sortType: "date",
     },
     {
       id: "posted",
       label: "Posted at (PKT)",
       value: (r) => timestamp(r.posted_at),
+      sortValue: (r) => r.posted_at,
+      sortType: "date",
     },
     {
       id: "peer",
@@ -251,6 +296,8 @@ export function Transactions({
       numeric: true,
       value: (r) =>
         r.attachment_count == null ? "—" : String(r.attachment_count),
+      sortValue: (r) => r.attachment_count,
+      sortType: "number",
     },
   ];
   const [visibleIds, setVisibleIds] = useState<string[]>(() => {
@@ -268,17 +315,43 @@ export function Transactions({
     return columns.map((c) => c.id);
   });
   const visibleColumns = columns.filter((c) => visibleIds.includes(c.id));
+  const fallbackSort: SortState = visibleIds.includes("date")
+    ? { key: "date", direction: "desc" }
+    : { key: visibleColumns[0].id, direction: "asc" };
+  const activeSort = visibleIds.includes(sort.key) ? sort : fallbackSort;
+  const sortColumn = columns.find((c) => c.id === activeSort.key)!;
   const saveColumns = (ids: string[]) => {
     setVisibleIds(ids);
+    if (!ids.includes(activeSort.key))
+      setSort(
+        ids.includes("date")
+          ? { key: "date", direction: "desc" }
+          : {
+              key: columns.find((c) => ids.includes(c.id))!.id,
+              direction: "asc",
+            },
+      );
     try {
       localStorage.setItem(storageKey, JSON.stringify(ids));
     } catch {
       /* Table still works without storage. */
     }
   };
-  const filtered = rows.filter(
-    (r) =>
-      (status === "all" || r.status === status) && (!kind || r.kind === kind),
+  const filtered = sortRows(
+    // Keep equal values deterministic when the list is refreshed.
+    sortRows(
+      rows.filter(
+        (r) =>
+          (status === "all" || r.status === status) &&
+          (!kind || r.kind === kind),
+      ),
+      (r) => r.id,
+      "desc",
+      "number",
+    ),
+    sortColumn.sortValue || sortColumn.value,
+    activeSort.direction,
+    sortColumn.sortType,
   );
   const canPost = can("transactions.post");
   const withinOwnScope = (row: Row) => {
@@ -617,12 +690,16 @@ export function Transactions({
                   </th>
                 )}
                 {visibleColumns.map((c) => (
-                  <th
+                  <SortHeader
                     key={c.id}
+                    label={c.label}
+                    column={c.id}
+                    sort={activeSort}
+                    onSort={(key) => setSort(nextSort(activeSort, key))}
+                    disabled={unavailable}
+                    numeric={c.numeric}
                     className={`${c.numeric ? "align-right " : ""}${c.id === "id" ? "transaction-id" : ""}`}
-                  >
-                    {c.label}
-                  </th>
+                  />
                 ))}
                 <th className="transaction-open">
                   <span className="visually-hidden">Details</span>
@@ -746,6 +823,7 @@ export function Transactions({
       <div className="table-bottom">
         Showing {filtered.length} transaction{filtered.length === 1 ? "" : "s"}{" "}
         · {visibleColumns.length} columns
+        {` · Sorted by ${sortColumn.label} ${activeSort.direction === "asc" ? "ascending" : "descending"}`}
         {eligible.length > MAX_SELECTED && canPost
           ? ` · Select all chooses the first ${MAX_SELECTED} eligible rows`
           : ""}

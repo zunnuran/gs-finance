@@ -41,6 +41,9 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { Transactions } from "./Transactions";
+import { SortHeader } from "./SortHeader";
+import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
+import Decimal from "decimal.js";
 
 type Row = Record<string, any>;
 type User = {
@@ -1595,20 +1598,43 @@ function TransactionTable({
   rows: Row[];
   onSelect: (d: Row) => void;
 }) {
+  const [sort, setSort] = useState<SortState | null>(null);
+  const columns = [
+    { key: "description", label: "Transaction", type: "text" },
+    { key: "date", label: "Date", type: "date" },
+    { key: "status", label: "Status", type: "text" },
+    { key: "amount", label: "Amount", type: "number" },
+  ] as const;
+  const activeColumn = columns.find((c) => c.key === sort?.key);
+  const sortedRows =
+    sort && activeColumn
+      ? sortRows(
+          rows,
+          (row) => row[activeColumn.key],
+          sort.direction,
+          activeColumn.type,
+        )
+      : rows;
   return rows.length ? (
     <div className="table-scroll">
       <table>
         <thead>
           <tr>
-            <th>Transaction</th>
-            <th>Date</th>
-            <th>Status</th>
-            <th className="align-right">Amount</th>
+            {columns.map((c) => (
+              <SortHeader
+                key={c.key}
+                column={c.key}
+                label={c.label}
+                sort={sort}
+                onSort={(key) => setSort((current) => nextSort(current, key))}
+                numeric={c.type === "number"}
+              />
+            ))}
             <th />
           </tr>
         </thead>
         <tbody>
-          {rows.map((d) => (
+          {sortedRows.map((d) => (
             <tr key={d.id} onClick={() => onSelect(d)} className="clickable">
               <td>
                 <div className="transaction-cell">
@@ -1690,8 +1716,10 @@ function MasterPage({
 }) {
   const table = page === "accounts" || page === "chart" ? "accounts" : page,
     [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortState | null>(null);
+  useEffect(() => setSort(null), [page, data.company.id]);
   const all = (data[table as keyof Data] as Row[]) || [];
-  const rows = all
+  const filteredRows = all
     .filter(
       (r) =>
         (page !== "accounts" || ["bank", "cash"].includes(r.purpose)) &&
@@ -1702,6 +1730,42 @@ function MasterPage({
             .includes(query.toLowerCase())),
     )
     .sort((a, b) => (table === "categories" ? a.position - b.position : 0));
+  const balance = (row: Row) =>
+    report?.trial?.find((a: Row) => a.id === row.id)?.balance ??
+    report?.cashPosition?.find((a: Row) => a.id === row.id)?.balance ??
+    0;
+  const sortValues: Record<
+    string,
+    (row: Row) => string | number | null | undefined
+  > = {
+    name: (row) => row.name,
+    type: (row) => title(page === "accounts" ? row.purpose : row.type),
+    currency: (row) => row.currency,
+    balance,
+    parent: (row) =>
+      data.categories.find((c) => c.id === row.parent_id)?.name || "Top level",
+    account: (row) => data.accounts.find((a) => a.id === row.account_id)?.name,
+    position: (row) => row.position,
+    status: (row) => (row.active ? "Active" : "Disabled"),
+  };
+  const rows =
+    sort && sortValues[sort.key]
+      ? sortRows(
+          filteredRows,
+          sortValues[sort.key],
+          sort.direction,
+          ["balance", "position"].includes(sort.key) ? "number" : "text",
+        )
+      : filteredRows;
+  const header = (key: string, label: string, numeric = false) => (
+    <SortHeader
+      column={key}
+      label={label}
+      sort={sort}
+      numeric={numeric}
+      onSort={(key) => setSort((current) => nextSort(current, key))}
+    />
+  );
   return (
     <section className="card">
       <div className="card-heading master-heading">
@@ -1769,24 +1833,23 @@ function MasterPage({
           <table>
             <thead>
               <tr>
-                <th>Name</th>
+                {header("name", "Name")}
                 {table === "accounts" && (
                   <>
-                    <th>Type</th>
-                    <th>Currency</th>
-                    {page === "accounts" && (
-                      <th className="align-right">Balance · PKR</th>
-                    )}
+                    {header("type", "Type")}
+                    {header("currency", "Currency")}
+                    {page === "accounts" &&
+                      header("balance", "Balance · PKR", true)}
                   </>
                 )}
                 {table === "categories" && (
                   <>
-                    <th>Parent category</th>
-                    <th>Account</th>
-                    <th>Order</th>
+                    {header("parent", "Parent category")}
+                    {header("account", "Account")}
+                    {header("position", "Order", true)}
                   </>
                 )}
-                <th>Status</th>
+                {header("status", "Status")}
                 <th />
               </tr>
             </thead>
@@ -1810,14 +1873,7 @@ function MasterPage({
                       <td>{r.currency}</td>
                       {page === "accounts" && (
                         <td className="align-right amount">
-                          {money(
-                            report?.trial?.find((a: Row) => a.id === r.id)
-                              ?.balance ??
-                              report?.cashPosition?.find(
-                                (a: Row) => a.id === r.id,
-                              )?.balance ??
-                              0,
-                          )}
+                          {money(balance(r))}
                         </td>
                       )}
                     </>
@@ -2109,6 +2165,12 @@ function PeoplePage({
   onSelect: (d: Row) => void;
 }) {
   const [tab, setTab] = useState("open");
+  const [peopleSort, setPeopleSort] = useState<SortState | null>(null);
+  const [documentSort, setDocumentSort] = useState<SortState | null>(null);
+  useEffect(() => {
+    setPeopleSort(null);
+    setDocumentSort(null);
+  }, [page, data.company.id]);
   const kind = page === "receivables" ? "customer" : "vendor",
     docKinds =
       page === "receivables" ? ["invoice"] : ["bill", "asset_purchase"];
@@ -2122,6 +2184,43 @@ function PeoplePage({
     (d) => d.status === "posted" && Number(d.amount) > Number(d.allocated),
   );
   const people = data.contacts.filter((c) => c.kind === kind);
+  const remainingAmount = (row: Row) =>
+    new Decimal(row.amount).minus(row.allocated || 0).toString();
+  const sortedPeople = peopleSort
+    ? sortRows(
+        people,
+        (row) =>
+          peopleSort.key === "status"
+            ? row.active
+              ? "Active"
+              : "Disabled"
+            : row[peopleSort.key],
+        peopleSort.direction,
+      )
+    : people;
+  const documentSortValues: Record<
+    string,
+    (row: Row) => string | number | null | undefined
+  > = {
+    description: (row) => row.description,
+    contact: (row) => row.contact_name,
+    due: (row) => row.due_date,
+    amount: (row) => row.amount,
+    outstanding: remainingAmount,
+  };
+  const sortedOutstanding =
+    documentSort && documentSortValues[documentSort.key]
+      ? sortRows(
+          outstanding,
+          documentSortValues[documentSort.key],
+          documentSort.direction,
+          documentSort.key === "due"
+            ? "date"
+            : ["amount", "outstanding"].includes(documentSort.key)
+              ? "number"
+              : "text",
+        )
+      : outstanding;
   const create = page === "receivables" ? "invoice" : "bill";
   return (
     <>
@@ -2196,15 +2295,27 @@ function PeoplePage({
                 <table>
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Email</th>
-                      <th>Phone</th>
-                      <th>Status</th>
+                      {[
+                        ["name", "Name"],
+                        ["email", "Email"],
+                        ["phone", "Phone"],
+                        ["status", "Status"],
+                      ].map(([key, label]) => (
+                        <SortHeader
+                          key={key}
+                          column={key}
+                          label={label}
+                          sort={peopleSort}
+                          onSort={(key) =>
+                            setPeopleSort((current) => nextSort(current, key))
+                          }
+                        />
+                      ))}
                       <th />
                     </tr>
                   </thead>
                   <tbody>
-                    {people.map((c) => (
+                    {sortedPeople.map((c) => (
                       <tr key={c.id}>
                         <td>
                           <strong>{c.name}</strong>
@@ -2243,16 +2354,29 @@ function PeoplePage({
             <table>
               <thead>
                 <tr>
-                  <th>Document</th>
-                  <th>{title(kind)}</th>
-                  <th>Due date</th>
-                  <th className="align-right">Total</th>
-                  <th className="align-right">Outstanding</th>
+                  {[
+                    ["description", "Document"],
+                    ["contact", title(kind)],
+                    ["due", "Due date"],
+                    ["amount", "Total"],
+                    ["outstanding", "Outstanding"],
+                  ].map(([key, label]) => (
+                    <SortHeader
+                      key={key}
+                      column={key}
+                      label={label}
+                      sort={documentSort}
+                      numeric={["amount", "outstanding"].includes(key)}
+                      onSort={(key) =>
+                        setDocumentSort((current) => nextSort(current, key))
+                      }
+                    />
+                  ))}
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {outstanding.map((d) => (
+                {sortedOutstanding.map((d) => (
                   <tr
                     key={d.id}
                     className="clickable"
@@ -2276,10 +2400,7 @@ function PeoplePage({
                       {money(d.amount, d.currency)}
                     </td>
                     <td className="align-right amount">
-                      {money(
-                        Number(d.amount) - Number(d.allocated),
-                        d.currency,
-                      )}
+                      {money(remainingAmount(d), d.currency)}
                     </td>
                     <td>
                       <ChevronRight size={16} />
@@ -3177,6 +3298,8 @@ function Reports({
   const [type, setType] = useState("profit"),
     [account, setAccount] = useState(""),
     [contact, setContact] = useState("");
+  const [sort, setSort] = useState<SortState | null>(null);
+  useEffect(() => setSort(null), [data.company.id]);
   const types = [
     ["profit", "Profit & loss"],
     ["balance", "Balance sheet"],
@@ -3324,6 +3447,27 @@ function Reports({
       ["bucket", "Aging"],
     ];
   }
+  const sortColumn = columns.find(([key]) => key === sort?.key);
+  if (sort && sortColumn) {
+    const [key, , format] = sortColumn;
+    const sortType: SortType =
+      format === "date"
+        ? "date"
+        : format === "money" ||
+            format === "number" ||
+            ["id", "document_id"].includes(key)
+          ? "number"
+          : "text";
+    // Retained earnings is a computed summary and stays beneath the account rows.
+    const summaries =
+      type === "balance" ? rows.filter((row) => row.id === "earnings") : [];
+    const details =
+      type === "balance" ? rows.filter((row) => row.id !== "earnings") : rows;
+    rows = [
+      ...sortRows(details, (row) => row[key], sort.direction, sortType),
+      ...summaries,
+    ];
+  }
   return (
     <section className="card">
       <div className="report-toolbar">
@@ -3334,6 +3478,7 @@ function Reports({
             setType(e.target.value);
             setAccount("");
             setContact("");
+            setSort(null);
           }}
         >
           {types.map(([k, v]) => (
@@ -3393,16 +3538,16 @@ function Reports({
             <thead>
               <tr>
                 {columns.map(([k, label, format]) => (
-                  <th
+                  <SortHeader
                     key={k}
-                    className={
-                      format === "money" || format === "number"
-                        ? "align-right"
-                        : ""
+                    column={k}
+                    label={label}
+                    sort={sort}
+                    numeric={format === "money" || format === "number"}
+                    onSort={(key) =>
+                      setSort((current) => nextSort(current, key))
                     }
-                  >
-                    {label}
-                  </th>
+                  />
                 ))}
               </tr>
             </thead>
@@ -3448,8 +3593,23 @@ function Reports({
         <div className="report-total">
           <strong>Total debits / credits</strong>
           <span>
-            {money(rows.reduce((s, r) => s + Number(r.debit), 0))} /{" "}
-            {money(rows.reduce((s, r) => s + Number(r.credit), 0))}
+            {money(
+              (report.trial || [])
+                .reduce(
+                  (total: Decimal, row: Row) => total.plus(row.debit || 0),
+                  new Decimal(0),
+                )
+                .toString(),
+            )}{" "}
+            /{" "}
+            {money(
+              (report.trial || [])
+                .reduce(
+                  (total: Decimal, row: Row) => total.plus(row.credit || 0),
+                  new Decimal(0),
+                )
+                .toString(),
+            )}
           </span>
         </div>
       )}
@@ -3460,11 +3620,24 @@ function Audit({ base, refresh }: { base: string; refresh: number }) {
   const [rows, setRows] = useState<Row[]>([]),
     [error, setError] = useState(""),
     [detail, setDetail] = useState<Row | null>(null);
+  const [sort, setSort] = useState<SortState | null>(null);
+  useEffect(() => setSort(null), [base]);
   useEffect(() => {
     api(base + "/audit")
       .then(setRows)
       .catch((e) => setError(e.message));
   }, [base, refresh]);
+  const sortedRows = sort
+    ? sortRows(
+        rows,
+        (row) =>
+          sort.key === "record"
+            ? `${title(row.entity)} #${row.entity_id}`
+            : row[sort.key],
+        sort.direction,
+        sort.key === "created_at" ? "date" : "text",
+      )
+    : rows;
   return (
     <>
       <section className="card">
@@ -3475,7 +3648,7 @@ function Audit({ base, refresh }: { base: string; refresh: number }) {
           </div>
           <button
             className="button secondary compact"
-            onClick={() => exportCSV("audit-trail", rows)}
+            onClick={() => exportCSV("audit-trail", sortedRows)}
             disabled={!rows.length}
           >
             <Download size={16} />
@@ -3488,15 +3661,27 @@ function Audit({ base, refresh }: { base: string; refresh: number }) {
             <table>
               <thead>
                 <tr>
-                  <th>When</th>
-                  <th>Who</th>
-                  <th>Action</th>
-                  <th>Record</th>
+                  {[
+                    ["created_at", "When"],
+                    ["full_name", "Who"],
+                    ["action", "Action"],
+                    ["record", "Record"],
+                  ].map(([key, label]) => (
+                    <SortHeader
+                      key={key}
+                      column={key}
+                      label={label}
+                      sort={sort}
+                      onSort={(key) =>
+                        setSort((current) => nextSort(current, key))
+                      }
+                    />
+                  ))}
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {sortedRows.map((r) => (
                   <tr key={r.id}>
                     <td>
                       {new Date(r.created_at).toLocaleString("en-GB", {
@@ -3734,11 +3919,48 @@ function Admin({
     [error, setError] = useState(""),
     [tab, setTab] = useState("users"),
     [editing, setEditing] = useState<Row | null>(null);
+  const [sort, setSort] = useState<SortState | null>(null);
   useEffect(() => {
     api("/api/admin")
       .then(setAdmin)
       .catch((e) => setError(e.message));
   }, [refresh]);
+  const roleName = (row: Row) =>
+    admin.roles.find((role: Row) => role.id === row.role_id)?.name || "";
+  const visibility = (row: Row) =>
+    roleName(row) === "super_admin" || row.data_scope === "company"
+      ? "All company data"
+      : row.data_scope === "own"
+        ? "Own data only"
+        : "Inherit role";
+  const columns =
+    tab === "users"
+      ? [
+          ["full_name", "Name"],
+          ["username", "Username"],
+          ["email", "Email"],
+          ["role", "Role"],
+          ["scope", "Data visibility"],
+          ["status", "Status"],
+        ]
+      : [
+          ["name", "Role"],
+          ["permissions", "Enabled permissions"],
+        ];
+  const sortedRows = sort
+    ? sortRows<Row>(
+        admin[tab],
+        (row) => {
+          if (sort.key === "role") return title(roleName(row));
+          if (sort.key === "scope") return visibility(row);
+          if (sort.key === "status") return row.active ? "Active" : "Disabled";
+          if (sort.key === "permissions") return row.permissions.length;
+          return row[sort.key];
+        },
+        sort.direction,
+        sort.key === "permissions" ? "number" : "text",
+      )
+    : admin[tab];
   return (
     <>
       <section className="card">
@@ -3758,13 +3980,19 @@ function Admin({
         <div className="tabs">
           <button
             className={tab === "users" ? "active" : ""}
-            onClick={() => setTab("users")}
+            onClick={() => {
+              setTab("users");
+              setSort(null);
+            }}
           >
             Users<span>{admin.users.length}</span>
           </button>
           <button
             className={tab === "roles" ? "active" : ""}
-            onClick={() => setTab("roles")}
+            onClick={() => {
+              setTab("roles");
+              setSort(null);
+            }}
           >
             Roles & permissions<span>{admin.roles.length}</span>
           </button>
@@ -3774,24 +4002,22 @@ function Admin({
           <table>
             <thead>
               <tr>
-                {(tab === "users"
-                  ? [
-                      "Name",
-                      "Username",
-                      "Email",
-                      "Role",
-                      "Data visibility",
-                      "Status",
-                      "",
-                    ]
-                  : ["Role", "Enabled permissions", ""]
-                ).map((h, i) => (
-                  <th key={i}>{h}</th>
+                {columns.map(([key, label]) => (
+                  <SortHeader
+                    key={key}
+                    column={key}
+                    label={label}
+                    sort={sort}
+                    onSort={(key) =>
+                      setSort((current) => nextSort(current, key))
+                    }
+                  />
                 ))}
+                <th />
               </tr>
             </thead>
             <tbody>
-              {(tab === "users" ? admin.users : admin.roles).map((r: Row) => (
+              {sortedRows.map((r: Row) => (
                 <tr key={r.id}>
                   {tab === "users" ? (
                     <>
@@ -3800,22 +4026,8 @@ function Admin({
                       </td>
                       <td>{r.username}</td>
                       <td>{r.email || "—"}</td>
-                      <td>
-                        {title(
-                          admin.roles.find((role: Row) => role.id === r.role_id)
-                            ?.name || "",
-                        )}
-                      </td>
-                      <td>
-                        {admin.roles.find((role: Row) => role.id === r.role_id)
-                          ?.name === "super_admin"
-                          ? "All company data"
-                          : r.data_scope === "own"
-                            ? "Own data only"
-                            : r.data_scope === "company"
-                              ? "All company data"
-                              : "Inherit role"}
-                      </td>
+                      <td>{title(roleName(r))}</td>
+                      <td>{visibility(r)}</td>
                       <td>
                         <Badge status={r.active ? "active" : "disabled"} />
                       </td>
