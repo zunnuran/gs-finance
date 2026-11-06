@@ -10,6 +10,7 @@ import { administrator } from "./config";
 declare module "express-session" {
   interface SessionData {
     userId: number;
+    expiresAt?: number;
   }
 }
 declare global {
@@ -28,6 +29,8 @@ declare global {
   }
 }
 const buckets = new Map<string, { n: number; until: number }>();
+const defaultSessionDuration = 2 * 24 * 60 * 60 * 1000;
+const rememberedSessionDuration = 14 * 24 * 60 * 60 * 1000;
 export async function bootstrap() {
   await transaction(async (c) => {
     await c.query("SELECT pg_advisory_xact_lock(871235)");
@@ -87,6 +90,18 @@ export async function bootstrap() {
 }
 export const authenticated: RequestHandler = async (req, res, next) => {
   try {
+    if (
+      req.session.expiresAt !== undefined &&
+      req.session.expiresAt <= Date.now()
+    ) {
+      await new Promise<void>((resolve, reject) =>
+        req.session.destroy((error) => (error ? reject(error) : resolve())),
+      );
+      res.clearCookie("gss.sid");
+      return void res
+        .status(401)
+        .json({ message: "Your session expired. Please sign in again." });
+    }
     if (!req.session.userId)
       return void res.status(401).json({ message: "Please sign in" });
     const u = (
@@ -153,7 +168,9 @@ export function setupAuth(app: Express) {
     pool,
     tableName: "sessions",
     createTableIfMissing: true,
-    ttl: 28800,
+    ttl: defaultSessionDuration / 1000,
+    // The selected duration starts at sign-in; activity must not extend it.
+    disableTouch: true,
   });
   app.set("trust proxy", process.env.TRUST_PROXY === "1" ? 1 : false);
   app.use("/api", (_req, res, next) => {
@@ -167,11 +184,12 @@ export function setupAuth(app: Express) {
       store,
       resave: false,
       saveUninitialized: false,
+      rolling: false,
       cookie: {
         httpOnly: true,
         sameSite: "lax",
         secure: process.env.NODE_ENV === "production",
-        maxAge: 8 * 60 * 60 * 1000,
+        maxAge: defaultSessionDuration,
       },
     }),
   );
@@ -207,6 +225,7 @@ export function setupAuth(app: Express) {
         .object({
           username: z.string().min(1).max(254),
           password: z.string().min(1).max(200),
+          rememberMe: z.boolean().default(false),
         })
         .parse(req.body);
       const u = (
@@ -223,6 +242,11 @@ export function setupAuth(app: Express) {
         req.session.regenerate((e) => (e ? reject(e) : resolve())),
       );
       req.session.userId = u.id;
+      const duration = d.rememberMe
+        ? rememberedSessionDuration
+        : defaultSessionDuration;
+      req.session.cookie.maxAge = duration;
+      req.session.expiresAt = Date.now() + duration;
       await new Promise<void>((resolve, reject) =>
         req.session.save((e) => (e ? reject(e) : resolve())),
       );

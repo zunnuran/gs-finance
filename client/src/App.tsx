@@ -17,6 +17,8 @@ import {
   CircleHelp,
   CreditCard,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Landmark,
   LayoutDashboard,
@@ -1100,6 +1102,8 @@ export default function App() {
 function Login({ onLogin }: { onLogin: () => Promise<void> }) {
   const [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
+    [showPassword, setShowPassword] = useState(false),
+    [rememberMe, setRememberMe] = useState(false),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   return (
@@ -1154,7 +1158,11 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
               setBusy(true);
               setError("");
               try {
-                await api("/api/login", "POST", { username, password });
+                await api("/api/login", "POST", {
+                  username,
+                  password,
+                  rememberMe,
+                });
                 await onLogin();
               } catch (e) {
                 setError((e as Error).message);
@@ -1173,16 +1181,48 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
                 required
               />
             </Field>
-            <Field label="Password">
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                required
-              />
-            </Field>
+            <div className="field login-password-field">
+              <label htmlFor="login-password">Password</label>
+              <div className="login-password-input">
+                <input
+                  id="login-password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  required
+                />
+                <button
+                  type="button"
+                  className="login-password-toggle"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  aria-controls="login-password"
+                  title={showPassword ? "Hide password" : "Show password"}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setShowPassword((current) => !current)}
+                >
+                  {showPassword ? (
+                    <EyeOff size={19} aria-hidden="true" />
+                  ) : (
+                    <Eye size={19} aria-hidden="true" />
+                  )}
+                </button>
+              </div>
+            </div>
+            <div className="login-session-options">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  disabled={busy}
+                />
+                Remember me for 2 weeks
+              </label>
+              <small>Default session: 2 days.</small>
+            </div>
             {error && (
               <div className="error" role="alert">
                 {error}

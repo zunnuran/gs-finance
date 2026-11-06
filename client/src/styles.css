@@ -2197,6 +2197,49 @@ input[role="switch"]:checked:before {
   min-height: 45px;
   background: var(--surface);
 }
+.login-password-field > label {
+  font-size: 11px;
+  font-weight: 550;
+}
+.login-password-input {
+  position: relative;
+}
+.login-password-input input {
+  padding-right: 47px;
+}
+.login-password-toggle {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  bottom: 3px;
+  width: 39px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+}
+.login-password-toggle:hover,
+.login-password-toggle[aria-pressed="true"] {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.login-password-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.login-session-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: -3px;
+}
+.login-session-options > small {
+  margin-left: 25px;
+  color: var(--muted);
+  font-size: 11px;
+}
 .login-form .button {
   min-height: 43px;
   font-size: 12px;

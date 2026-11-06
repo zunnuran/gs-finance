@@ -319,6 +319,156 @@ describe(
       await ok("/api/logout", { method: "POST", cookie: emailCookie });
     });
 
+    test("login persists a fixed two-day or remembered fourteen-day session and resets it on reauthentication", async () => {
+      const dayMs = 24 * 60 * 60 * 1000;
+      let previousCookie: string | undefined;
+      let previousSid: string | undefined;
+      for (const rememberMe of [undefined, true, false]) {
+        const duration = (rememberMe ? 14 : 2) * dayMs;
+        const started = Date.now();
+        const { response, data } = await request("/api/login", {
+          method: "POST",
+          cookie: previousCookie,
+          body: { username: "admin", password, rememberMe },
+        });
+        const finished = Date.now();
+        assert.equal(response.status, 200, JSON.stringify(data));
+        const header = response.headers.get("set-cookie")!;
+        const cookie = header.split(";")[0];
+        assert.ok(cookie.startsWith("gss.sid="));
+        assert.match(header, /HttpOnly/i);
+        assert.match(header, /SameSite=Lax/i);
+        assert.equal(/; Secure/i.test(header), productionBuild);
+        const expires = Date.parse(/Expires=([^;]+)/i.exec(header)![1]);
+        assert.ok(expires >= started + duration - 1000);
+        assert.ok(expires <= finished + duration + 1000);
+        const signed = decodeURIComponent(
+          cookie.slice(cookie.indexOf("=") + 1),
+        );
+        assert.ok(signed.startsWith("s:"));
+        const sid = signed.slice(2, signed.lastIndexOf("."));
+        const stored = (
+          await control.query(
+            `SELECT sess, extract(epoch FROM expire AT TIME ZONE current_setting('TimeZone')) * 1000 AS expires_ms FROM ${schema}.sessions WHERE sid=$1`,
+            [sid],
+          )
+        ).rows[0];
+        assert.ok(stored);
+        assert.equal(stored.sess.cookie.originalMaxAge, duration);
+        assert.ok(stored.sess.expiresAt >= started + duration);
+        assert.ok(stored.sess.expiresAt <= finished + duration);
+        assert.ok(
+          Math.abs(Number(stored.expires_ms) - stored.sess.expiresAt) < 1100,
+        );
+        assert.ok(Math.abs(expires - stored.sess.expiresAt) < 1100);
+        const activity = await request("/api/auth/user", { cookie });
+        assert.equal(activity.response.status, 200);
+        assert.equal(activity.response.headers.get("set-cookie"), null);
+        const afterActivity = (
+          await control.query(
+            `SELECT sess, extract(epoch FROM expire AT TIME ZONE current_setting('TimeZone')) * 1000 AS expires_ms FROM ${schema}.sessions WHERE sid=$1`,
+            [sid],
+          )
+        ).rows[0];
+        assert.deepEqual(
+          afterActivity,
+          stored,
+          "Activity must not extend the chosen session lifetime",
+        );
+        if (previousCookie && previousSid) {
+          assert.notEqual(
+            cookie,
+            previousCookie,
+            "Reauthentication rotates the session identifier",
+          );
+          assert.equal(
+            (await request("/api/auth/user", { cookie: previousCookie }))
+              .response.status,
+            401,
+          );
+          assert.equal(
+            (
+              await control.query(
+                `SELECT 1 FROM ${schema}.sessions WHERE sid=$1`,
+                [previousSid],
+              )
+            ).rowCount,
+            0,
+          );
+        }
+        previousCookie = cookie;
+        previousSid = sid;
+      }
+      await ok("/api/logout", { method: "POST", cookie: previousCookie });
+      assert.equal(
+        (await request("/api/auth/user", { cookie: previousCookie })).response
+          .status,
+        401,
+      );
+      assert.equal(
+        (
+          await control.query(`SELECT 1 FROM ${schema}.sessions WHERE sid=$1`, [
+            previousSid,
+          ])
+        ).rowCount,
+        0,
+      );
+    });
+
+    test("remember-me requires a boolean and an expired server deadline rejects a replayed cookie", async () => {
+      const count = (
+        await control.query(`SELECT count(*) FROM ${schema}.sessions`)
+      ).rows[0].count;
+      for (const rememberMe of ["true", 1, null, []]) {
+        const invalid = await request("/api/login", {
+          method: "POST",
+          body: { username: "admin", password, rememberMe },
+        });
+        assert.equal(invalid.response.status, 400);
+        assert.equal(invalid.response.headers.get("set-cookie"), null);
+      }
+      assert.equal(
+        (await control.query(`SELECT count(*) FROM ${schema}.sessions`)).rows[0]
+          .count,
+        count,
+      );
+      const { response } = await request("/api/login", {
+        method: "POST",
+        body: { username: "admin", password, rememberMe: true },
+      });
+      assert.equal(response.status, 200);
+      const cookie = response.headers.get("set-cookie")!.split(";")[0];
+      const signed = decodeURIComponent(cookie.slice(cookie.indexOf("=") + 1));
+      const sid = signed.slice(2, signed.lastIndexOf("."));
+      // Leave the browser cookie and store expiry in the future to exercise the
+      // server's fixed deadline rather than the session store's expiry filter.
+      await control.query(
+        `UPDATE ${schema}.sessions SET sess=jsonb_set(sess::jsonb,'{expiresAt}',to_jsonb($2::bigint)) WHERE sid=$1`,
+        [sid, Date.now() - 1000],
+      );
+      const expired = await request("/api/auth/user", { cookie });
+      assert.equal(expired.response.status, 401);
+      assert.ok(
+        Date.parse(
+          /Expires=([^;]+)/i.exec(
+            expired.response.headers.get("set-cookie")!,
+          )![1],
+        ) < Date.now(),
+      );
+      assert.equal(
+        (
+          await control.query(`SELECT 1 FROM ${schema}.sessions WHERE sid=$1`, [
+            sid,
+          ])
+        ).rowCount,
+        0,
+      );
+      assert.equal(
+        (await request("/api/companies", { cookie })).response.status,
+        401,
+      );
+    });
+
     test("only the fixed administrator can hold the super administrator role", async () => {
       const before = await ok("/api/admin");
       const superRole = roles.find((r) => r.name === "super_admin");
