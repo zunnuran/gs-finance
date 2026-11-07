@@ -2508,7 +2508,9 @@ function TransactionModal({
       "opening",
       "adjustment",
     ].includes(k),
-    head = ["receipt", "expense", "bill", "invoice"].includes(k),
+    head =
+      ["receipt", "expense", "bill", "invoice"].includes(k) ||
+      (k === "client_payment" && !form.relatedId),
     category = ["expense", "bill"].includes(k);
   const contactKind = ["invoice", "client_payment"].includes(k)
     ? "customer"
@@ -2533,7 +2535,7 @@ function TransactionModal({
       a.active &&
       (k === "receipt"
         ? ["revenue", "equity", "liability"].includes(a.type)
-        : k === "invoice"
+        : ["invoice", "client_payment"].includes(k)
           ? a.type === "revenue"
           : a.type === "expense" && a.purpose !== "depreciation"),
   );
@@ -2592,7 +2594,7 @@ function TransactionModal({
             payload.categoryId = form.categoryId || null;
           }
           if (form.contactId) payload.contactId = form.contactId;
-          if (settle) payload.relatedId = form.relatedId;
+          if (settle) payload.relatedId = form.relatedId || null;
           if (["invoice", "bill"].includes(k) && form.dueDate)
             payload.dueDate = form.dueDate;
           if (k === "intercompany")
@@ -2661,10 +2663,27 @@ function TransactionModal({
           />
         </Field>
         {settle && (
-          <Field label="Document to settle" wide>
+          <Field
+            label={
+              k === "client_payment"
+                ? "Client invoice (optional)"
+                : "Document to settle"
+            }
+            hint={
+              k === "client_payment"
+                ? "Choose an invoice to reduce its balance, or leave blank to record income without an invoice."
+                : undefined
+            }
+            wide
+          >
             <Select
               value={form.relatedId}
-              required
+              required={k !== "client_payment"}
+              placeholder={
+                k === "client_payment"
+                  ? "No invoice — record as income"
+                  : "Select an option"
+              }
               options={related.map((d) => ({
                 id: d.id,
                 name: `#${d.id} · ${d.contact_name || ""} · ${d.description} · ${money(Number(d.amount) - Number(d.allocated), d.currency)}`,
@@ -2673,13 +2692,19 @@ function TransactionModal({
                 const doc = related.find((d) => d.id === Number(v));
                 setForm((f) => ({
                   ...f,
-                  relatedId: Number(v),
-                  contactId: doc?.contact_id,
-                  currency: doc?.currency || "PKR",
-                  rate: doc?.rate || "1",
-                  amount: doc
-                    ? String(Number(doc.amount) - Number(doc.allocated))
-                    : "",
+                  relatedId: v ? Number(v) : null,
+                  headId: null,
+                  categoryId: null,
+                  ...(doc
+                    ? {
+                        contactId: doc.contact_id,
+                        currency: doc.currency,
+                        rate: doc.rate,
+                        amount: new Decimal(doc.amount)
+                          .minus(doc.allocated || 0)
+                          .toFixed(2),
+                      }
+                    : {}),
                 }));
               }}
             />
@@ -2866,9 +2891,16 @@ function TransactionModal({
             label={
               k === "receipt"
                 ? "Source of money / income head"
-                : k === "invoice"
-                  ? "Revenue account"
-                  : "Expense account"
+                : k === "client_payment"
+                  ? "Income account"
+                  : k === "invoice"
+                    ? "Revenue account"
+                    : "Expense account"
+            }
+            hint={
+              k === "client_payment"
+                ? "Use this for earned income. For a customer deposit or advance, use Receive money with a liability account."
+                : undefined
             }
           >
             <Select

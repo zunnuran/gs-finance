@@ -405,6 +405,180 @@ test("retired advance and asset actions cannot create new documents or post reta
   );
 });
 
+test("client payments without an invoice recognize selected income without settling existing receivables and can be reversed", async () => {
+  const f = await fixture("Uninvoiced client payment");
+  const invoice = await f.post({
+    kind: "invoice",
+    amount: "500",
+    contactId: f.customer,
+    headId: f.system.revenue,
+  });
+  const payment = await f.post({
+    kind: "client_payment",
+    amount: "200",
+    contactId: f.customer,
+    targetId: f.bank,
+    headId: f.system.other_income,
+  });
+  assert.equal(payment.status, "posted");
+  assert.equal(payment.related_id, null);
+  await f.expectBalance(f.bank, "200");
+  await f.expectBalance(f.system.other_income, "-200");
+  await f.expectBalance(f.system.receivable, "500");
+  const lines = (
+    await connection.query(
+      "SELECT l.account_id,l.debit,l.credit,l.contact_id FROM journal_lines l JOIN journals j ON j.id=l.journal_id WHERE j.document_id=$1 ORDER BY l.id",
+      [payment.id],
+    )
+  ).rows;
+  assert.deepEqual(lines, [
+    {
+      account_id: f.bank,
+      debit: "200.00",
+      credit: "0.00",
+      contact_id: f.customer,
+    },
+    {
+      account_id: f.system.other_income,
+      debit: "0.00",
+      credit: "200.00",
+      contact_id: f.customer,
+    },
+  ]);
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM allocations WHERE document_id=$1 OR related_id=$2",
+        [payment.id, invoice.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  const report = await reports(
+    connection,
+    f.company.id,
+    "2026-10-01",
+    "2026-10-31",
+  );
+  assert.equal(report.summary.revenue, "700.00");
+  assert.equal(report.agingReceivables.length, 1);
+  assert.equal(report.agingReceivables[0].id, invoice.id);
+  assert.equal(report.agingReceivables[0].outstanding, "500.00");
+  await tx((c) =>
+    reverseDocument(c, f.company.id, userId, payment.id, "2026-10-11"),
+  );
+  await f.expectBalance(f.bank, "0");
+  await f.expectBalance(f.system.other_income, "0");
+  await f.expectBalance(f.system.receivable, "500");
+  const after = await reports(
+    connection,
+    f.company.id,
+    "2026-10-01",
+    "2026-10-31",
+  );
+  assert.equal(after.summary.revenue, "500.00");
+  assert.equal(after.agingReceivables[0].outstanding, "500.00");
+});
+
+test("uninvoiced foreign client payments use their own exchange rate without creating settlement FX", async () => {
+  const f = await fixture("Uninvoiced foreign payment");
+  await f.post({
+    kind: "client_payment",
+    amount: "100",
+    currency: "USD",
+    rate: "285",
+    contactId: f.customer,
+    targetId: f.usd,
+    headId: f.system.revenue,
+    relatedId: null,
+  });
+  await f.expectBalance(f.usd, "28500");
+  await f.expectBalance(f.system.revenue, "-28500");
+  await f.expectBalance(f.system.receivable, "0");
+  await f.expectBalance(f.system.fx, "0");
+});
+
+test("uninvoiced client payments require an active company revenue account and customer before posting", async () => {
+  const f = await fixture("Uninvoiced payment controls");
+  const other = await fixture("Uninvoiced payment other company");
+  await connection.query("UPDATE accounts SET active=false WHERE id=$1", [
+    f.system.other_income,
+  ]);
+  const category = (
+    await connection.query(
+      "INSERT INTO categories(company_id,name,account_id) VALUES($1,'Revenue category',$2) RETURNING id",
+      [f.company.id, f.system.revenue],
+    )
+  ).rows[0].id;
+  const cases = [
+    { headId: null },
+    { headId: f.bank },
+    { headId: f.system.payable },
+    { headId: f.system.office },
+    { headId: f.system.other_income },
+    { headId: null, categoryId: category },
+    { contactId: null },
+    { contactId: f.vendor },
+  ];
+  for (const invalid of cases) {
+    const pending = await f.draft({
+      kind: "client_payment",
+      targetId: f.bank,
+      headId: f.system.revenue,
+      contactId: f.customer,
+      ...invalid,
+    });
+    await assert.rejects(
+      () => tx((c) => postDocument(c, f.company.id, userId, pending.id)),
+      /account|revenue|contact|customer/i,
+    );
+    assert.equal(
+      (
+        await connection.query("SELECT status FROM documents WHERE id=$1", [
+          pending.id,
+        ])
+      ).rows[0].status,
+      "pending",
+    );
+  }
+  // Cross-company references are rejected by database constraints at creation,
+  // before an invalid pending transaction can reach the posting checks.
+  for (const invalid of [
+    { headId: other.system.revenue },
+    { contactId: other.customer },
+  ]) {
+    await assert.rejects(
+      () =>
+        f.draft({
+          kind: "client_payment",
+          targetId: f.bank,
+          headId: f.system.revenue,
+          contactId: f.customer,
+          ...invalid,
+        }),
+      { code: "23503" },
+    );
+  }
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM journals WHERE company_id=$1",
+        [f.company.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM allocations a JOIN documents d ON d.id=a.document_id WHERE d.company_id=$1",
+        [f.company.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+});
+
 test("partial client payments clear historic receivables and record only the realized exchange difference", async () => {
   const f = await fixture("Foreign receivables");
   const invoice = await f.post({
@@ -423,10 +597,12 @@ test("partial client payments clear historic receivables and record only the rea
     contactId: f.customer,
     targetId: f.usd,
     relatedId: invoice.id,
+    headId: f.system.other_income,
   });
   await f.expectBalance(f.system.receivable, "168000");
   await f.expectBalance(f.usd, "114000");
   await f.expectBalance(f.system.fx, "-2000");
+  await f.expectBalance(f.system.other_income, "0");
   await f.post({
     kind: "client_payment",
     amount: "600",

@@ -388,7 +388,13 @@ export async function postDocument(
       break;
     case "client_payment":
       debit = account(d.target_id, ["asset"], true);
-      credit = sys("receivable");
+      if (!d.related_id && !d.head_id)
+        fail(
+          "Select an income account for a client payment without an invoice",
+        );
+      credit = d.related_id
+        ? sys("receivable")
+        : account(d.head_id, ["revenue"]);
       break;
     case "vendor_payment":
       debit = sys("payable");
@@ -439,12 +445,8 @@ export async function postDocument(
   }
   let allocatedBase: string | null = null;
   if (
-    [
-      "client_payment",
-      "vendor_payment",
-      "advance_expense",
-      "advance_return",
-    ].includes(d.kind)
+    (d.kind === "client_payment" && d.related_id) ||
+    ["vendor_payment", "advance_expense", "advance_return"].includes(d.kind)
   ) {
     const original =
       (
