@@ -89,6 +89,81 @@ input[type="checkbox"] {
   cursor: pointer;
   flex-shrink: 0;
 }
+.searchable-select {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+.searchable-select-input {
+  padding-right: 35px;
+  text-overflow: ellipsis;
+}
+.searchable-select-chevron {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--muted);
+}
+.searchable-select-menu {
+  position: fixed;
+  z-index: 200;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: 0 12px 36px #43074426;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 400;
+  scrollbar-width: thin;
+}
+.searchable-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 9px 10px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.searchable-select-option.is-active,
+.searchable-select-option:hover:not([aria-disabled="true"]) {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.searchable-select-option.is-selected {
+  font-weight: 650;
+}
+.searchable-select-option[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.searchable-select-option svg {
+  flex-shrink: 0;
+  color: var(--primary);
+}
+.searchable-select-empty,
+.searchable-select-count {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.searchable-select-count {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
 textarea {
   resize: vertical;
 }
@@ -206,9 +281,9 @@ small {
   color: var(--muted);
   font-weight: 700;
 }
-.company-select select {
+.company-select .searchable-select-input {
   border: 0;
-  padding: 1px 10px 0 0;
+  padding: 1px 24px 0 0;
   background: transparent;
   min-height: 23px;
   border-radius: 0;
@@ -564,11 +639,13 @@ main {
   color: var(--muted);
   box-shadow: none;
 }
-.filterbar > select {
+.filterbar > .searchable-select {
   width: 148px;
+}
+.filterbar .searchable-select-input {
   font-size: 10px;
   min-height: 33px;
-  padding: 5px 8px;
+  padding: 5px 30px 5px 8px;
   color: var(--muted);
 }
 .filter-note {
@@ -1080,9 +1157,11 @@ tr.clickable:hover {
   padding: 17px 22px;
   flex-wrap: wrap;
 }
-.table-toolbar > select {
-  width: auto;
+.table-toolbar > .searchable-select {
+  width: 180px;
   min-width: 180px;
+}
+.table-toolbar .searchable-select-input {
   font-size: 11px;
   min-height: 36px;
 }
@@ -1195,6 +1274,18 @@ tr.clickable:hover {
   margin: 13px 0;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
+}
+.column-picker-search {
+  min-height: 35px;
+  margin-top: 12px;
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  font-size: 11px;
+}
+.column-picker-empty {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 11px;
 }
 .column-options {
   display: grid;
@@ -1956,11 +2047,13 @@ input[role="switch"]:checked:before {
   color: var(--muted);
   margin-top: 4px;
 }
-.permission-row select {
+.permission-row > .searchable-select {
   width: 135px;
+}
+.permission-row .searchable-select-input {
   min-height: 33px;
   font-size: 11px;
-  padding: 5px 8px;
+  padding: 5px 30px 5px 8px;
 }
 .card > .modal-footer {
   padding: 20px 23px;
@@ -1977,9 +2070,11 @@ input[role="switch"]:checked:before {
   padding: 20px 23px;
   border-bottom: 1px solid var(--border);
 }
-.report-toolbar select {
-  width: auto;
+.report-toolbar > .searchable-select {
+  width: 230px;
   min-width: 170px;
+}
+.report-toolbar .searchable-select-input {
   font-size: 11px;
   min-height: 36px;
 }
@@ -2528,7 +2623,7 @@ input[role="switch"]:checked:before {
     gap: 8px;
     flex-wrap: wrap;
   }
-  .filterbar > select {
+  .filterbar > .searchable-select {
     width: 135px;
   }
   .date-range {
@@ -2561,7 +2656,7 @@ input[role="switch"]:checked:before {
     min-width: 200px;
     max-width: none;
   }
-  .table-toolbar > select {
+  .table-toolbar > .searchable-select {
     flex: 1;
     min-width: 150px;
   }
@@ -2660,7 +2755,7 @@ input[role="switch"]:checked:before {
     padding: 17px;
     gap: 9px;
   }
-  .report-toolbar select {
+  .report-toolbar > .searchable-select {
     width: 100%;
   }
   .report-toolbar > .button:first-of-type {
@@ -2722,7 +2817,7 @@ input[role="switch"]:checked:before {
   .date-range input {
     width: 106px;
   }
-  .filterbar > select {
+  .filterbar > .searchable-select {
     flex: 1;
     min-width: 100px;
   }

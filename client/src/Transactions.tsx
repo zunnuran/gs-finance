@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import Decimal from "decimal.js";
 import { SortHeader } from "./SortHeader";
+import { SearchableSelect } from "./SearchableSelect";
 import {
   nextSort,
   sortRows,
@@ -140,6 +141,7 @@ export function Transactions({
 }) {
   const [status, setStatus] = useState("pending");
   const [kind, setKind] = useState("");
+  const [columnQuery, setColumnQuery] = useState("");
   const [sort, setSort] = useState<SortState>({
     key: "date",
     direction: "desc",
@@ -488,21 +490,19 @@ export function Transactions({
             placeholder="Search transactions, references, contacts…"
           />
         </div>
-        <select
+        <SearchableSelect
           aria-label="Transaction type"
           value={kind}
           disabled={busy}
-          onChange={(e) => setKind(e.target.value)}
-        >
-          <option value="">All transaction types</option>
-          {Object.entries(kindLabels)
-            .filter(([key]) => !RETIRED_KINDS.has(key))
-            .map(([key, value]) => (
-              <option key={key} value={key}>
-                {value}
-              </option>
-            ))}
-        </select>
+          onChange={setKind}
+          placeholder="All transaction types"
+          options={[
+            { value: "", label: "All transaction types" },
+            ...Object.entries(kindLabels)
+              .filter(([key]) => !RETIRED_KINDS.has(key))
+              .map(([value, label]) => ({ value, label })),
+          ]}
+        />
         <details className="column-picker">
           <summary className="button secondary compact">
             <SlidersHorizontal size={16} />
@@ -520,6 +520,14 @@ export function Transactions({
               <strong>Visible columns</strong>
               <span>Saved for your login on this browser</span>
             </div>
+            <input
+              className="column-picker-search"
+              type="search"
+              aria-label="Search columns"
+              placeholder="Search columns…"
+              value={columnQuery}
+              onChange={(event) => setColumnQuery(event.target.value)}
+            />
             <div className="column-picker-actions">
               <button
                 type="button"
@@ -537,7 +545,15 @@ export function Transactions({
               </button>
             </div>
             <div className="column-options">
-              {columns.map((c) => (
+              {sortRows(
+                columns.filter((column) =>
+                  column.label
+                    .toLowerCase()
+                    .includes(columnQuery.trim().toLowerCase()),
+                ),
+                (column) => column.label,
+                "asc",
+              ).map((c) => (
                 <label key={c.id}>
                   <input
                     type="checkbox"
@@ -556,6 +572,15 @@ export function Transactions({
                   {c.label}
                 </label>
               ))}
+              {!columns.some((column) =>
+                column.label
+                  .toLowerCase()
+                  .includes(columnQuery.trim().toLowerCase()),
+              ) && (
+                <p className="column-picker-empty" role="status">
+                  No matching columns
+                </p>
+              )}
             </div>
           </div>
         </details>

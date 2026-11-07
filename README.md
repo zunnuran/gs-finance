@@ -31,6 +31,8 @@ Use the eye icon on the sign-in form to show or hide the password. New sessions 
 
 The initial company has a PKR base currency, a chart of accounts, and operating expense categories. Create bank/cash accounts, clients, vendors, cash custodians, and additional users before recording transactions.
 
+Dropdowns throughout the app are searchable and list options in ascending alphabetical order, with numbers ordered naturally. Type to filter choices, use the arrow keys and Enter to select, or Escape to close the list. An existing selection changes only when you choose another option. Empty/All choices remain at the top. The transaction **Columns** picker also supports search and alphabetically ordered choices.
+
 Transactions use **Pending → Posted**. Saving a transaction creates a Pending record without changing balances; a user with `transactions.post` can post it directly, including their own transaction. There are no submission, approval, or rejection steps. Pending transactions can be edited or cancelled; posted transactions are corrected through reversal. Cancelled and Reversed remain available in transaction history.
 
 In **Transactions**, select up to 100 eligible Pending entries and choose **Post selected**. The confirmation shows the selection and flags imported entries containing review notes. Posting processes entries in date order, with a result for each entry; successful entries post independently, while failures remain Pending for correction and retry. Existing posting permissions, data visibility, period locks, and accounting checks still apply. Changing the search or filters clears the selection.

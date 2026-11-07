@@ -41,6 +41,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { Transactions } from "./Transactions";
+import { SearchableSelect } from "./SearchableSelect";
 import { SortHeader } from "./SortHeader";
 import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
 import Decimal from "decimal.js";
@@ -351,6 +352,7 @@ function Select({
   placeholder = "Select an option",
   required = false,
   disabled = false,
+  "aria-label": ariaLabel,
 }: {
   value: any;
   onChange: (v: string) => void;
@@ -358,21 +360,25 @@ function Select({
   placeholder?: string;
   required?: boolean;
   disabled?: boolean;
+  "aria-label"?: string;
 }) {
   return (
-    <select
+    <SearchableSelect
       value={value ?? ""}
-      onChange={(e) => onChange(e.target.value)}
+      onChange={onChange}
       required={required}
       disabled={disabled}
-    >
-      <option value="">{placeholder}</option>
-      {options.map((o) => (
-        <option key={o.id} value={o.id}>
-          {o.name}
-        </option>
-      ))}
-    </select>
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      options={[
+        { value: "", label: placeholder },
+        ...options.map((option) => ({
+          value: option.id,
+          label: String(option.name ?? ""),
+          searchText: String(option.code ?? ""),
+        })),
+      ]}
+    />
   );
 }
 
@@ -653,22 +659,20 @@ export default function App() {
           </div>
           <div>
             <small>YOUR WORKSPACE</small>
-            <select
+            <SearchableSelect
               aria-label="Company"
               value={company || ""}
-              onChange={(e) => {
-                selectCompany(Number(e.target.value));
-              }}
-            >
-              {!companies.length && (
-                <option value="">Set up your company</option>
-              )}
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => selectCompany(Number(value))}
+              placeholder="Set up your company"
+              options={
+                companies.length
+                  ? companies.map((company) => ({
+                      value: company.id,
+                      label: company.name,
+                    }))
+                  : [{ value: "", label: "Set up your company" }]
+              }
+            />
           </div>
         </div>
         <nav>
@@ -1979,37 +1983,36 @@ function MasterModal({
               />
             </Field>
             <Field label="Account type">
-              <select
+              <SearchableSelect
+                aria-label="Account type"
                 value={form.type}
-                onChange={(e) => set("type", e.target.value)}
-              >
-                {["asset", "liability", "equity", "revenue", "expense"].map(
-                  (t) => (
-                    <option key={t} value={t}>
-                      {title(t)}
-                    </option>
-                  ),
-                )}
-              </select>
+                onChange={(value) => set("type", value)}
+                options={[
+                  "asset",
+                  "liability",
+                  "equity",
+                  "revenue",
+                  "expense",
+                ].map((value) => ({ value, label: title(value) }))}
+              />
             </Field>
             <Field label="Account purpose">
-              <select
+              <SearchableSelect
+                aria-label="Account purpose"
                 value={form.purpose}
-                onChange={(e) => {
-                  set("purpose", e.target.value);
-                  if (e.target.value !== "general") set("type", "asset");
+                onChange={(value) => {
+                  set("purpose", value);
+                  if (value !== "general") set("type", "asset");
                 }}
                 disabled={
                   row?.purpose &&
                   !["general", "bank", "cash"].includes(row.purpose)
                 }
-              >
-                {["general", "bank", "cash"].map((t) => (
-                  <option key={t} value={t}>
-                    {title(t)}
-                  </option>
-                ))}
-              </select>
+                options={["general", "bank", "cash"].map((value) => ({
+                  value,
+                  label: title(value),
+                }))}
+              />
             </Field>
             <Field label="Currency">
               <input
@@ -2057,16 +2060,15 @@ function MasterModal({
           <>
             {form.kind !== "employee" && (
               <Field label="Contact type">
-                <select
+                <SearchableSelect
+                  aria-label="Contact type"
                   value={form.kind}
-                  onChange={(e) => set("kind", e.target.value)}
-                >
-                  {["customer", "vendor"].map((k) => (
-                    <option key={k} value={k}>
-                      {title(k)}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(value) => set("kind", value)}
+                  options={["customer", "vendor"].map((value) => ({
+                    value,
+                    label: title(value),
+                  }))}
+                />
               </Field>
             )}
             <Field label="Email">
@@ -2605,9 +2607,10 @@ function TransactionModal({
         }}
       >
         <Field label="Business action" wide>
-          <select
+          <SearchableSelect
+            aria-label="Business action"
             value={k}
-            onChange={(e) =>
+            onChange={(value) =>
               setForm((f) => ({
                 date: f.date,
                 amount: "",
@@ -2615,17 +2618,12 @@ function TransactionModal({
                 rate: "1",
                 description: "",
                 reference: "",
-                kind: e.target.value,
+                kind: value,
                 openingSide: "debit",
               }))
             }
-          >
-            {options.map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
+            options={options.map(([value, label]) => ({ value, label }))}
+          />
         </Field>
         {(source || target) &&
           !cash.length &&
@@ -2822,15 +2820,18 @@ function TransactionModal({
         )}
         {k === "opening" && (
           <Field label="Opening balance side">
-            <select
+            <SearchableSelect
+              aria-label="Opening balance side"
               value={form.openingSide}
-              onChange={(e) => set("openingSide", e.target.value)}
-            >
-              <option value="debit">Debit (usually assets / expenses)</option>
-              <option value="credit">
-                Credit (usually liabilities / equity)
-              </option>
-            </select>
+              onChange={(value) => set("openingSide", value)}
+              options={[
+                { value: "debit", label: "Debit (usually assets / expenses)" },
+                {
+                  value: "credit",
+                  label: "Credit (usually liabilities / equity)",
+                },
+              ]}
+            />
           </Field>
         )}
         {category && (
@@ -3471,24 +3472,20 @@ function Reports({
   return (
     <section className="card">
       <div className="report-toolbar">
-        <select
+        <SearchableSelect
           aria-label="Report"
           value={type}
-          onChange={(e) => {
-            setType(e.target.value);
+          onChange={(value) => {
+            setType(value);
             setAccount("");
             setContact("");
             setSort(null);
           }}
-        >
-          {types.map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
-            </option>
-          ))}
-        </select>
+          options={types.map(([value, label]) => ({ value, label }))}
+        />
         {["ledger", "bank", "journal"].includes(type) && (
           <Select
+            aria-label="Report account"
             value={account}
             onChange={setAccount}
             options={data.accounts.filter(
@@ -3499,6 +3496,7 @@ function Reports({
         )}
         {type === "contact" && (
           <Select
+            aria-label="Report contact"
             value={contact}
             onChange={setContact}
             options={data.contacts}
@@ -4201,23 +4199,22 @@ function AccessModal({
               />
             </Field>
             <Field label="Data visibility" wide>
-              <select
+              <SearchableSelect
+                aria-label="Data visibility"
                 value={form.data_scope || "inherit"}
                 disabled={
                   admin.roles.find((role: Row) => role.id === form.role_id)
                     ?.name === "super_admin"
                 }
-                onChange={(e) =>
-                  set(
-                    "data_scope",
-                    e.target.value === "inherit" ? null : e.target.value,
-                  )
+                onChange={(value) =>
+                  set("data_scope", value === "inherit" ? null : value)
                 }
-              >
-                <option value="inherit">Inherit role</option>
-                <option value="own">Own data only</option>
-                <option value="company">All assigned company data</option>
-              </select>
+                options={[
+                  { value: "inherit", label: "Inherit role" },
+                  { value: "own", label: "Own data only" },
+                  { value: "company", label: "All assigned company data" },
+                ]}
+              />
               <small>
                 Own data only shows this user's submissions, assigned cash, and
                 cash transactions. Company income, private payroll, and other
@@ -4340,7 +4337,7 @@ function AccessModal({
                 <small>{title(p.split(".")[1])}</small>
               </span>
               {isUser ? (
-                <select
+                <SearchableSelect
                   aria-label={p}
                   value={
                     form.overrides[p] === undefined
@@ -4349,17 +4346,18 @@ function AccessModal({
                         ? "allow"
                         : "deny"
                   }
-                  onChange={(e) => {
+                  onChange={(value) => {
                     const next = { ...form.overrides };
-                    if (e.target.value === "inherit") delete next[p];
-                    else next[p] = e.target.value === "allow";
+                    if (value === "inherit") delete next[p];
+                    else next[p] = value === "allow";
                     set("overrides", next);
                   }}
-                >
-                  <option value="inherit">Inherit role</option>
-                  <option value="allow">Enabled</option>
-                  <option value="deny">Disabled</option>
-                </select>
+                  options={[
+                    { value: "inherit", label: "Inherit role" },
+                    { value: "allow", label: "Enabled" },
+                    { value: "deny", label: "Disabled" },
+                  ]}
+                />
               ) : (
                 <input
                   aria-label={p}
