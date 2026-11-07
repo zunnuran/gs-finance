@@ -708,6 +708,240 @@ describe(
       assert.ok(!settings.permissions.includes("transactions.approve"));
     });
 
+    test("transaction ledger exposes stored posting and reversal entries with transaction-view access", async () => {
+      const category = await ok(`/api/c/${company}/categories`, {
+        method: "POST",
+        body: { name: "Ledger history category", account_id: head },
+      });
+      const document = await createPending({
+        kind: "expense",
+        date: "2026-10-03",
+        amount: "125.50",
+        description: "Ledger detail history test",
+        sourceId: bank,
+        categoryId: category.id,
+      });
+      const path = `/api/c/${company}/documents/${document.id}/ledger`;
+      assert.equal((await request(path)).response.status, 401);
+      assert.deepEqual(await ok(path), { journals: [] });
+      await post(document.id);
+      const original = await ok(path, { cookie: employeeCookie });
+      assert.equal(original.journals.length, 1);
+      assert.equal(original.journals[0].date, "2026-10-03");
+      assert.equal(original.journals[0].reversal_of, null);
+      assert.deepEqual(
+        original.journals[0].lines.map((line: any) => [
+          line.account_id,
+          line.debit,
+          line.credit,
+          line.currency,
+          line.foreign_amount,
+        ]),
+        [
+          [head, "125.50", "0.00", "PKR", "125.50"],
+          [bank, "0.00", "125.50", "PKR", "-125.50"],
+        ],
+      );
+      const bankLine = original.journals[0].lines.find(
+        (line: any) => line.account_id === bank,
+      );
+      assert.equal(bankLine.account_code, "HTTPBANK");
+      assert.equal(bankLine.account_name, "HTTP Bank");
+      assert.deepEqual(Object.keys(bankLine).sort(), [
+        "account_code",
+        "account_id",
+        "account_name",
+        "credit",
+        "currency",
+        "debit",
+        "foreign_amount",
+        "id",
+      ]);
+      const setup = await ok(`/api/c/${company}/bootstrap`);
+      await ok(`/api/c/${company}/categories/${category.id}`, {
+        method: "PATCH",
+        body: {
+          name: category.name,
+          account_id: setup.accounts.find((a: any) => a.purpose === "software")
+            .id,
+        },
+      });
+      assert.deepEqual(
+        await ok(path),
+        original,
+        "Historical entries do not follow a remapped category",
+      );
+      await ok(`/api/c/${company}/documents/${document.id}/reverse`, {
+        method: "POST",
+        body: { date: "2026-10-04" },
+      });
+      const reversed = await ok(path);
+      assert.equal(reversed.journals.length, 2);
+      assert.deepEqual(reversed.journals[0], original.journals[0]);
+      assert.equal(reversed.journals[1].reversal_of, original.journals[0].id);
+      assert.equal(reversed.journals[1].date, "2026-10-04");
+      for (const line of original.journals[0].lines) {
+        const undo = reversed.journals[1].lines.find(
+          (candidate: any) => candidate.account_id === line.account_id,
+        );
+        assert.equal(undo.debit, line.credit);
+        assert.equal(undo.credit, line.debit);
+      }
+      assert.equal(
+        (
+          await request(
+            `/api/c/${otherCompany}/documents/${document.id}/ledger`,
+            { cookie: adminCookie },
+          )
+        ).response.status,
+        404,
+      );
+      assert.equal(
+        (
+          await request(
+            `/api/c/${otherCompany}/documents/${document.id}/ledger`,
+            { cookie: viewerCookie },
+          )
+        ).response.status,
+        403,
+      );
+      assert.equal(
+        (
+          await request(`/api/c/${company}/documents/2147483647/ledger`, {
+            cookie: adminCookie,
+          })
+        ).response.status,
+        404,
+      );
+      const cancelled = await createPending({
+        kind: "expense",
+        date: "2026-10-03",
+        amount: "5",
+        description: "Cancelled ledger detail",
+        sourceId: bank,
+        headId: head,
+      });
+      await ok(`/api/c/${company}/documents/${cancelled.id}/cancel`, {
+        method: "POST",
+        body: {},
+      });
+      assert.deepEqual(
+        await ok(`/api/c/${company}/documents/${cancelled.id}/ledger`),
+        { journals: [] },
+      );
+      await ok("/api/admin/users", {
+        method: "POST",
+        body: {
+          username: "http_no_ledger_access",
+          full_name: "No transaction view",
+          password,
+          role_id: roles.find((r) => r.name === "viewer").id,
+          active: true,
+          companies: [company],
+          data_scope: "company",
+          overrides: { "transactions.view": false },
+        },
+      });
+      const deniedCookie = await login("http_no_ledger_access");
+      assert.equal(
+        (await request(path, { cookie: deniedCookie })).response.status,
+        403,
+      );
+      assert.equal(
+        (
+          await request(`/api/c/${company}/documents/${cancelled.id}/ledger`, {
+            cookie: deniedCookie,
+          })
+        ).response.status,
+        403,
+      );
+    });
+
+    test("inter-company transaction details reveal only the current company's journal", async () => {
+      const target = await ok(`/api/c/${otherCompany}/accounts`, {
+        method: "POST",
+        body: {
+          code: "LEDGER-RECEIVER",
+          name: "Receiver-only bank",
+          type: "asset",
+          purpose: "bank",
+          currency: "PKR",
+        },
+      });
+      await ok("/api/admin/users", {
+        method: "POST",
+        body: {
+          username: "http_ledger_receiver",
+          full_name: "Receiver-only viewer",
+          password,
+          role_id: roles.find((r) => r.name === "viewer").id,
+          active: true,
+          companies: [otherCompany],
+          data_scope: "company",
+          overrides: {},
+        },
+      });
+      const receiverCookie = await login("http_ledger_receiver");
+      const document = await createPending({
+        kind: "intercompany",
+        date: "2026-10-05",
+        amount: "300",
+        description: "Company-local ledger details",
+        sourceId: bank,
+        targetId: target.id,
+        otherCompanyId: otherCompany,
+      });
+      const incomingPath = `/api/c/${otherCompany}/documents/${document.id}/ledger`;
+      assert.equal(
+        (await request(incomingPath, { cookie: receiverCookie })).response
+          .status,
+        404,
+      );
+      await post(document.id);
+      const outgoing = await ok(
+        `/api/c/${company}/documents/${document.id}/ledger`,
+      );
+      const incoming = await ok(incomingPath, { cookie: receiverCookie });
+      assert.equal(outgoing.journals.length, 1);
+      assert.equal(incoming.journals.length, 1);
+      assert.notEqual(outgoing.journals[0].id, incoming.journals[0].id);
+      assert.equal(outgoing.journals[0].lines.length, 2);
+      assert.equal(incoming.journals[0].lines.length, 2);
+      assert.ok(
+        incoming.journals[0].lines.some(
+          (line: any) =>
+            line.account_id === target.id && line.debit === "300.00",
+        ),
+      );
+      assert.ok(
+        !incoming.journals[0].lines.some(
+          (line: any) => line.account_id === bank,
+        ),
+      );
+      assert.ok(
+        !outgoing.journals[0].lines.some(
+          (line: any) => line.account_id === target.id,
+        ),
+      );
+      assert.doesNotMatch(JSON.stringify(incoming), /HTTPBANK|HTTP Bank/);
+      assert.equal(
+        (
+          await request(`/api/c/${company}/documents/${document.id}/ledger`, {
+            cookie: receiverCookie,
+          })
+        ).response.status,
+        403,
+      );
+      await ok(`/api/c/${company}/documents/${document.id}/reverse`, {
+        method: "POST",
+        body: { date: "2026-10-06" },
+      });
+      const reversed = await ok(incomingPath, { cookie: receiverCookie });
+      assert.equal(reversed.journals.length, 2);
+      assert.equal(reversed.journals[1].reversal_of, incoming.journals[0].id);
+      assert.doesNotMatch(JSON.stringify(reversed), /HTTPBANK|HTTP Bank/);
+    });
+
     test("uploads reach their handler and downloads retain document access checks", async () => {
       assert.equal(
         (
@@ -1172,6 +1406,35 @@ describe(
         JSON.stringify(visible),
         /PRIVATE SALARY DETAILS|PRIVATE CLIENT INCOME/,
       );
+      const ownLedger = await ok(`${prefix}/documents/${deposit.id}/ledger`, {
+        cookie: ownCookie,
+      });
+      assert.equal(ownLedger.journals.length, 1);
+      assert.equal(ownLedger.journals[0].lines.length, 2);
+      const cashLine = ownLedger.journals[0].lines.find(
+        (line: any) => line.account_id === cash.id,
+      );
+      assert.equal(cashLine.account_name, "Linked cash");
+      assert.equal(cashLine.account_code, "SCOPE-CASH");
+      assert.equal(cashLine.debit, "1000.00");
+      const hiddenLine = ownLedger.journals[0].lines.find(
+        (line: any) => line.account_id === null,
+      );
+      assert.equal(hiddenLine.account_code, null);
+      assert.equal(hiddenLine.account_name, "Other account");
+      assert.equal(hiddenLine.credit, "1000.00");
+      assert.doesNotMatch(
+        JSON.stringify(ownLedger),
+        /Private bank|SCOPE-BANK|contact_id|company_id/,
+      );
+      for (const doc of [otherDeposit, salary, income])
+        await denied(`${prefix}/documents/${doc.id}/ledger`);
+      assert.deepEqual(
+        await ok(`${prefix}/documents/${financeDraft.id}/ledger`, {
+          cookie: ownCookie,
+        }),
+        { journals: [] },
+      );
       const ownBalances = await ok(`${prefix}/my-cash`, { cookie: ownCookie });
       assert.deepEqual(
         ownBalances.map((a: any) => a.id).sort((a: number, b: number) => a - b),
@@ -1207,6 +1470,7 @@ describe(
         ),
         "Historical private ledger accounts remain private after category remapping",
       );
+      await denied(`${prefix}/documents/${salary.id}/ledger`);
       await denied(
         `${prefix}/documents/${salary.id}/attachments/${privateAttachment.id}`,
       );

@@ -41,6 +41,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { Transactions } from "./Transactions";
+import { TransactionLedger, formatLedgerAmount } from "./TransactionLedger";
 import { SearchableSelect } from "./SearchableSelect";
 import { SortHeader } from "./SortHeader";
 import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
@@ -3090,6 +3091,38 @@ function DocumentDetail({
             (doc.kind === "asset_purchase" && !doc.source_id)
           ? "vendor_payment"
           : null;
+  const accountLabel = (accountId: number | null) => {
+    const account = data.accounts.find((a) => a.id === accountId);
+    return account ? `${account.code} · ${account.name}` : "—";
+  };
+  const category = data.categories.find((c) => c.id === doc.category_id);
+  const categoryParts: string[] = [];
+  const seenCategories = new Set<number>();
+  for (
+    let current = category;
+    current && !seenCategories.has(current.id);
+    current = data.categories.find((c) => c.id === current?.parent_id)
+  ) {
+    seenCategories.add(current.id);
+    categoryParts.unshift(current.name);
+  }
+  const custodians = data.accounts
+    .filter(
+      (a) => [doc.source_id, doc.target_id].includes(a.id) && a.custodian_id,
+    )
+    .map((a) => data.contacts.find((c) => c.id === a.custodian_id)?.name)
+    .filter(Boolean);
+  const timestamp = (value: string) =>
+    value
+      ? new Date(value).toLocaleString("en-GB", {
+          timeZone: "Asia/Karachi",
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "—";
   return (
     <Modal
       title={`Transaction #${String(doc.id).padStart(5, "0")}`}
@@ -3114,25 +3147,49 @@ function DocumentDetail({
         <Badge status={doc.status} />
       </div>
       <h3 className="document-description">{doc.description}</h3>
+      <TransactionLedger
+        key={`${base}/${doc.id}`}
+        base={base}
+        documentId={doc.id}
+        status={doc.status}
+        companyName={data.company.name}
+        request={api}
+      />
+      <h3 className="transaction-details-heading">Transaction details</h3>
       <dl className="detail-grid">
         {[
+          ["Company", data.company.name || "—"],
           ["Date", dateLabel(doc.date)],
           ["Reference", doc.reference || "—"],
+          ["Currency", doc.currency],
+          ["Amount in PKR", formatLedgerAmount(doc.base_amount || 0)],
+          ...(doc.currency !== "PKR"
+            ? [[`PKR per 1 ${doc.currency}`, new Decimal(doc.rate).toFixed()]]
+            : []),
           [
             "Contact",
             doc.contact_name ||
               data.contacts.find((c) => c.id === doc.contact_id)?.name ||
               "—",
           ],
-          [
-            "Paid from",
-            data.accounts.find((a) => a.id === doc.source_id)?.name || "—",
-          ],
-          [
-            "Receiving account",
-            data.accounts.find((a) => a.id === doc.target_id)?.name || "—",
-          ],
-          ["Created by", doc.creator || "—"],
+          ["Paid from", accountLabel(doc.source_id)],
+          ["Receiving account", accountLabel(doc.target_id)],
+          ...(!doc.inbound
+            ? [
+                ["Category", categoryParts.join(" / ") || "—"],
+                ["Selected account head", accountLabel(doc.head_id)],
+                ["Cash custodian", [...new Set(custodians)].join(", ") || "—"],
+                [
+                  "Related transaction",
+                  doc.related_id
+                    ? `#${String(doc.related_id).padStart(5, "0")}`
+                    : "—",
+                ],
+                ["Created by", doc.creator || "—"],
+                ["Created at (PKT)", timestamp(doc.created_at)],
+              ]
+            : []),
+          ["Posted at (PKT)", timestamp(doc.posted_at)],
           ["Due date", dateLabel(doc.due_date)],
         ].map(([k, v]) => (
           <div key={k}>

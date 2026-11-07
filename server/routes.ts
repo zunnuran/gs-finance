@@ -501,6 +501,67 @@ export function registerRoutes(app: Express) {
       );
     }),
   );
+  app.get(
+    "/api/c/:company/documents/:id/ledger",
+    requirePermission("transactions.view"),
+    route(async (req, res) => {
+      const company = id(req.params.company),
+        documentId = id(req.params.id);
+      await assertOwnDocument(pool, req.actor, company, documentId);
+      const document = (
+        await pool.query(
+          `SELECT status FROM documents WHERE id=$1 AND (
+            company_id=$2 OR (kind='intercompany' AND other_company_id=$2 AND status IN ('posted','reversed'))
+          )`,
+          [documentId, company],
+        )
+      ).rows[0];
+      if (!document) fail("Transaction not found", 404);
+      if (!["posted", "reversed"].includes(document.status))
+        return res.json({ journals: [] });
+      const context =
+        req.actor.dataScope === "own"
+          ? await ownContext(pool, req.actor, company)
+          : null;
+      const visibleAccounts = context
+        ? new Set([...context.cash, ...context.expenses].map((a) => a.id))
+        : null;
+      const journals = (
+        await pool.query(
+          "SELECT id,date,reversal_of FROM journals WHERE document_id=$1 AND company_id=$2 ORDER BY date,id",
+          [documentId, company],
+        )
+      ).rows;
+      const lines = (
+        await pool.query(
+          `SELECT l.id,l.journal_id,l.account_id,a.code account_code,a.name account_name,
+            l.debit,l.credit,l.currency,l.foreign_amount
+          FROM journal_lines l JOIN journals j ON j.id=l.journal_id
+          JOIN accounts a ON a.id=l.account_id AND a.company_id=l.company_id
+          WHERE j.document_id=$1 AND j.company_id=$2 AND l.company_id=$2
+          ORDER BY j.date,j.id,l.id`,
+          [documentId, company],
+        )
+      ).rows;
+      res.json({
+        journals: journals.map((journal) => ({
+          ...journal,
+          lines: lines
+            .filter((line) => line.journal_id === journal.id)
+            .map(({ journal_id, ...line }) =>
+              visibleAccounts && !visibleAccounts.has(line.account_id)
+                ? {
+                    ...line,
+                    account_id: null,
+                    account_code: null,
+                    account_name: "Other account",
+                  }
+                : line,
+            ),
+        })),
+      });
+    }),
+  );
   app.patch(
     "/api/c/:company/documents/:id",
     requirePermission("transactions.create"),
@@ -671,8 +732,9 @@ export function registerRoutes(app: Express) {
       res.json({
         results: response,
         posted: response.filter((item) => item.status === "posted").length,
-        alreadyPosted: response.filter((item) => item.status === "already_posted")
-          .length,
+        alreadyPosted: response.filter(
+          (item) => item.status === "already_posted",
+        ).length,
         failed: response.filter((item) => item.status === "failed").length,
       });
     }),
