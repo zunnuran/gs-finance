@@ -10,6 +10,7 @@ import {
   reverseDocument,
 } from "../server/accounting";
 import { reports } from "../server/reports";
+import { ownCashBalances } from "../server/access";
 import type { Connection } from "../server/db";
 
 // PostgreSQL itself executes constraints and PL/pgSQL; no ledger/storage mocks.
@@ -310,6 +311,240 @@ async function historicalPosting(
     return doc;
   });
 }
+
+test("monthly carry balances reconcile without posting journals and preserve assigned cash scope", async () => {
+  const f = await fixture("Monthly carry");
+  await f.post({
+    kind: "opening",
+    targetId: f.cash,
+    amount: "50000",
+    date: "2026-10-31",
+  });
+  await f.post({
+    kind: "receipt",
+    targetId: f.cash,
+    headId: f.system.revenue,
+    amount: "20000",
+    date: "2026-11-01",
+  });
+  const expense = await f.post({
+    kind: "expense",
+    sourceId: f.cash,
+    headId: f.system.office,
+    amount: "15000",
+    date: "2026-11-30",
+  });
+  await f.draft({
+    kind: "expense",
+    sourceId: f.cash,
+    headId: f.system.office,
+    amount: "1000",
+    date: "2026-11-15",
+  });
+  const cancelled = await f.draft({
+    kind: "expense",
+    sourceId: f.cash,
+    headId: f.system.office,
+    amount: "2000",
+    date: "2026-11-15",
+  });
+  await connection.query(
+    "UPDATE documents SET status='cancelled' WHERE id=$1",
+    [cancelled.id],
+  );
+  const countBefore = (
+    await connection.query("SELECT count(*)::int n FROM journals")
+  ).rows[0].n;
+  const november = await reports(
+    connection,
+    f.company.id,
+    "2026-11-01",
+    "2026-11-30",
+  );
+  const cash = november.balances.accounts.find((a) => a.id === f.cash)!;
+  assert.deepEqual(
+    [cash.opening, cash.debit, cash.credit, cash.closing],
+    ["50000.00", "20000.00", "15000.00", "55000.00"],
+  );
+  assert.equal(november.summary.revenue, "20000.00");
+  assert.equal(november.summary.expenses, "15000.00");
+  assert.equal(november.summary.cashFlow, "5000.00");
+  assert.equal(november.openingSummary.cash, "50000.00");
+  assert.equal(
+    november.balances.custodians.find((a) => a.custodian_id === f.employee)
+      ?.closing,
+    "55000.00",
+  );
+  assert.equal(
+    november.openingLedger.find((a) => a.account_id === f.cash)?.opening,
+    "50000.00",
+  );
+  const december = await reports(
+    connection,
+    f.company.id,
+    "2026-12-01",
+    "2026-12-31",
+  );
+  assert.equal(
+    december.balances.accounts.find((a) => a.id === f.cash)?.opening,
+    "55000.00",
+  );
+  assert.equal(
+    december.balances.accounts.find((a) => a.id === f.cash)?.closing,
+    "55000.00",
+  );
+  assert.equal(december.summary.expenses, "0.00");
+  assert.equal(december.ledger.length, 0);
+  assert.equal(
+    (await connection.query("SELECT count(*)::int n FROM journals")).rows[0].n,
+    countBefore,
+  );
+  await connection.query(
+    "INSERT INTO user_contacts(user_id,company_id,contact_id) VALUES($1,$2,$3)",
+    [userId, f.company.id, f.employee],
+  );
+  const assigned = await ownCashBalances(
+    connection,
+    { id: userId, dataScope: "own" },
+    f.company.id,
+    { from: "2026-11-01", to: "2026-11-30" },
+  );
+  assert.equal(assigned.length, 1);
+  assert.equal(assigned[0].id, f.cash);
+  assert.equal(new Decimal(assigned[0].opening).toFixed(2), cash.opening);
+  assert.equal(new Decimal(assigned[0].closing).toFixed(2), cash.closing);
+  await tx((c) =>
+    reverseDocument(c, f.company.id, userId, expense.id, "2026-12-02"),
+  );
+  const reversed = await reports(
+    connection,
+    f.company.id,
+    "2026-12-01",
+    "2026-12-31",
+  );
+  assert.equal(
+    reversed.balances.accounts.find((a) => a.id === f.cash)?.closing,
+    "70000.00",
+  );
+  assert.equal(reversed.summary.expenses, "-15000.00");
+  const stillNovember = await reports(
+    connection,
+    f.company.id,
+    "2026-11-01",
+    "2026-11-30",
+  );
+  assert.equal(stillNovember.summary.cash, "55000.00");
+});
+
+test("period balances retain foreign units separately from carrying value and carry earlier client invoices", async () => {
+  const f = await fixture("Currency carry");
+  await f.post({
+    kind: "receipt",
+    targetId: f.usd,
+    headId: f.system.capital,
+    amount: "100",
+    currency: "USD",
+    rate: "280",
+    date: "2026-10-31",
+  });
+  await f.post({
+    kind: "expense",
+    sourceId: f.usd,
+    headId: f.system.software,
+    amount: "25",
+    currency: "USD",
+    rate: "285",
+    date: "2026-11-01",
+  });
+  const invoice = await f.post({
+    kind: "invoice",
+    headId: f.system.revenue,
+    contactId: f.customer,
+    amount: "1000",
+    date: "2026-10-01",
+  });
+  const payment = await f.post({
+    kind: "client_payment",
+    relatedId: invoice.id,
+    targetId: f.bank,
+    contactId: f.customer,
+    amount: "400",
+    date: "2026-11-02",
+  });
+  await tx((c) =>
+    reverseDocument(c, f.company.id, userId, payment.id, "2026-12-01"),
+  );
+  const report = await reports(
+    connection,
+    f.company.id,
+    "2026-11-01",
+    "2026-11-30",
+  );
+  const usd = report.balances.accounts.find((a) => a.id === f.usd)!;
+  assert.deepEqual(
+    [
+      usd.currency,
+      usd.opening,
+      usd.closing,
+      usd.nominal_opening,
+      usd.nominal_credit,
+      usd.nominal_closing,
+    ],
+    ["USD", "28000.00", "21000.00", "100.00", "25.00", "75.00"],
+  );
+  assert.equal(report.openingSummary.receivable, "1000.00");
+  assert.equal(report.summary.receivable, "600.00");
+  assert.equal(report.agingReceivables[0].id, invoice.id);
+  assert.equal(report.agingReceivables[0].outstanding, "600.00");
+  const client = report.balances.contacts.find(
+    (a) => a.contact_id === f.customer,
+  )!;
+  assert.deepEqual(
+    [client.opening, client.debit, client.credit, client.closing],
+    ["1000.00", "0.00", "400.00", "600.00"],
+  );
+});
+
+test("inter-company carry balances preserve both entities across a financial-year boundary", async () => {
+  const a = await fixture("FY sender"),
+    b = await fixture("FY receiver");
+  await a.post({
+    kind: "receipt",
+    targetId: a.bank,
+    headId: a.system.capital,
+    amount: "1000",
+    date: "2026-06-29",
+  });
+  const transfer = await a.post({
+    kind: "intercompany",
+    sourceId: a.bank,
+    targetId: b.bank,
+    otherCompanyId: b.company.id,
+    amount: "400",
+    date: "2026-06-30",
+  });
+  await tx((c) =>
+    reverseDocument(c, a.company.id, userId, transfer.id, "2026-07-01"),
+  );
+  const sender = await reports(
+    connection,
+    a.company.id,
+    "2026-07-01",
+    "2027-06-30",
+  );
+  const receiver = await reports(
+    connection,
+    b.company.id,
+    "2026-07-01",
+    "2027-06-30",
+  );
+  assert.equal(sender.balances.intercompany[0].opening, "400.00");
+  assert.equal(receiver.balances.intercompany[0].opening, "-400.00");
+  assert.equal(sender.balances.intercompany[0].closing, "0.00");
+  assert.equal(receiver.balances.intercompany[0].closing, "0.00");
+  assert.equal(sender.summary.revenue, "0.00");
+  assert.equal(receiver.summary.expenses, "0.00");
+});
 
 test("cash custody, transfers and expenses preserve double entry without recognizing transfer income", async () => {
   const f = await fixture("Cash custody");

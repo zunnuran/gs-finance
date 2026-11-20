@@ -75,6 +75,18 @@ The user's **Data visibility** must be **All assigned company data**, or **Inher
 
 Use **Record asset purchase** for a paid asset purchase from assigned cash. **Accounting adjustment** is the separate advanced action for authorized company-wide accountants who need to choose both debit and credit accounts.
 
+## Monthly and annual financial views
+
+Super Admin has a shared **Period** selector on financial screens. Choose **Month**, **Calendar year** (January–December), **Financial year** (July–June), or **Custom dates**, then **Apply period**. The initial selection is the current month in Pakistan time; selections are remembered separately for each user and company in that browser.
+
+The selection applies to Overview, Transactions, Bank & Cash, Chart of Accounts, Clients & Receivables, Vendors & Payables, and reports/exports. **B/F** is the posted balance before the first selected date; period debits and credits reconcile it to **C/F**, the balance through the last date. Bank/cash amounts, receivables, payables and balance-sheet figures are balances as of period end. Income, expenses, profit and cash-flow movements are activity during the period. Foreign-currency units are kept separate from PKR equivalents. Account statements include B/F, chronological running balances and C/F, including accounts with no activity during the period.
+
+Transactions display activity dates and current lifecycle statuses. A reversal appears on its journal date and links to the original document. Older unpaid invoices and bills remain included in historical outstanding balances; available payment actions use their current outstanding amount. Full transaction detail shows complete history and identifies journal dates outside the selected period. A transaction saved outside the selection remains valid, and the success notification explains where to find it.
+
+To expand access later, enable **View monthly & annual periods** (`transactions.view_periods`) for a role or user in **Users & permissions**. Staff, including Finance, do not receive this permission by default. It does not grant additional company access, reports, private data, posting rights or accounting adjustments. Own-data users retain only their permitted transactions and assigned cash. Existing custom report-date access remains unchanged for users without this permission.
+
+This is a viewing feature: it does not restrict entry dates, change existing period locks, generate carry-forward journals or close a financial year. Later backdated postings/corrections update historical views. No database migration is required for this feature.
+
 ## Development commands
 
 ```powershell

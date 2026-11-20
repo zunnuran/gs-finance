@@ -28,12 +28,14 @@ export function TransactionLedger({
   status,
   companyName,
   request,
+  period,
 }: {
   base: string;
   documentId: number;
   status: string;
   companyName: string;
   request: (url: string) => Promise<{ journals: Journal[] }>;
+  period?: { from: string; to: string; label: string };
 }) {
   const [journals, setJournals] = useState<Journal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,6 +67,12 @@ export function TransactionLedger({
       <div className="transaction-ledger-heading">
         <h3>Accounting entries</h3>
         <p>{companyName} · Debit and credit amounts in PKR</p>
+        {period && (
+          <p>
+            Full transaction history · Viewing {period.label}. Entries outside{" "}
+            the selected period are identified below.
+          </p>
+        )}
       </div>
       {loading ? (
         <p className="subtle" role="status">
@@ -101,6 +109,8 @@ export function TransactionLedger({
           );
           const balanced = journal.lines.length > 0 && debit.eq(credit);
           const foreign = journal.lines.some((line) => line.currency !== "PKR");
+          const outsidePeriod =
+            period && (journal.date < period.from || journal.date > period.to);
           return (
             <div className="ledger-journal" key={journal.id}>
               <div className="ledger-journal-heading">
@@ -120,6 +130,7 @@ export function TransactionLedger({
                     {journal.reversal_of
                       ? ` · Reverses journal #${journal.reversal_of}`
                       : ""}
+                    {outsidePeriod ? " · Outside selected period" : ""}
                   </span>
                 </div>
                 <span

@@ -3016,6 +3016,69 @@ input::placeholder,
 textarea::placeholder {
   color: var(--muted);
 }
+.period-selector {
+  background: var(--surface, white);
+  border: 1px solid var(--border, #eadfeb);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 22px;
+}
+.period-selector form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.period-selector-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #800382;
+  font-weight: 650;
+}
+.period-selector .searchable-select {
+  min-width: 160px;
+  width: 180px;
+  flex: 0 1 180px;
+}
+.period-selector label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.period-selector input[type="number"] {
+  width: 95px;
+}
+.period-caption {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted, #726575);
+}
+.period-caption strong {
+  color: #800382;
+}
+.statement-summary td {
+  background: #faf3fb;
+}
+@media (max-width: 650px) {
+  .period-selector form {
+    align-items: stretch;
+  }
+  .period-selector-label {
+    width: 100%;
+  }
+  .period-selector .searchable-select {
+    flex: 1 1 150px;
+  }
+  .period-caption {
+    gap: 6px;
+    flex-direction: column;
+  }
+}
 @media print {
   .sidebar,
   .topbar,

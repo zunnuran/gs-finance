@@ -2,6 +2,7 @@ export const permissionKeys = [
   "dashboard.view",
   "masters.manage",
   "transactions.view",
+  "transactions.view_periods",
   "transactions.create",
   "transactions.purchase_assets",
   "transactions.post",
@@ -27,6 +28,11 @@ export const permissionDetails: Record<
   "transactions.view": {
     label: "View transactions",
     description: "View transactions within the user's data visibility.",
+  },
+  "transactions.view_periods": {
+    label: "View monthly & annual periods",
+    description:
+      "Filter financial screens by month, calendar year, financial year or custom dates, with brought-forward and carried-forward balances. Existing module and data visibility permissions still apply.",
   },
   "transactions.create": {
     label: "Create transactions",
@@ -70,7 +76,12 @@ export const roleDefaults: Record<string, string[]> = {
   super_admin: [...permissionKeys],
   // Staff asset-purchase access is granted explicitly, separately from data visibility.
   finance: permissionKeys.filter(
-    (p) => !["users.manage", "transactions.purchase_assets"].includes(p),
+    (p) =>
+      ![
+        "users.manage",
+        "transactions.purchase_assets",
+        "transactions.view_periods",
+      ].includes(p),
   ),
   manager: ["dashboard.view", "transactions.view", "reports.view"],
   employee: ["transactions.view", "transactions.create"],

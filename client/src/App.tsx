@@ -47,6 +47,9 @@ import { SortHeader } from "./SortHeader";
 import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
 import Decimal from "decimal.js";
 import { permissionDetails } from "../../shared/permissions";
+import { PeriodSelector, useFinancialPeriod } from "./PeriodSelector";
+import { periodQuery, type ResolvedPeriod } from "../../shared/period";
+import { PeriodReports } from "./PeriodReports";
 
 type Row = Record<string, any>;
 type User = {
@@ -392,6 +395,7 @@ export default function App() {
     [company, setCompany] = useState<number>(0),
     [data, setData] = useState<Data>(emptyData),
     [documents, setDocuments] = useState<Row[]>([]),
+    [periodActivity, setPeriodActivity] = useState<Row[]>([]),
     [report, setReport] = useState<Row | null>(null),
     [page, setPage] = useState("dashboard"),
     [loading, setLoading] = useState(false),
@@ -406,6 +410,18 @@ export default function App() {
     [masterRevision, setMasterRevision] = useState(0),
     [refresh, setRefresh] = useState(0);
   const can = (p: string) => !!user?.permissions.includes(p);
+  const financialPeriod = useFinancialPeriod(
+    user?.id,
+    company,
+    can("transactions.view_periods"),
+  );
+  const period = financialPeriod.period;
+  const periodSearch = period ? periodQuery(financialPeriod.value) : "";
+  const periodKey = period
+    ? `${period.from}/${period.to}/${period.mode}`
+    : "legacy";
+  const viewFrom = period?.from || from,
+    viewTo = period?.to || to;
   const ownData = user?.dataScope === "own";
   const base = `/api/c/${company}`;
   const notify = (text: string) => {
@@ -469,10 +485,17 @@ export default function App() {
   useEffect(() => {
     setData(emptyData);
     setDocuments([]);
+    setPeriodActivity([]);
     setReport(null);
     setModal(null);
     setSelected(null);
   }, [accessKey]);
+  useEffect(() => {
+    setSelected(null);
+    setPeriodActivity([]);
+    setReport(null);
+    setQuery("");
+  }, [company, periodKey]);
   useEffect(() => {
     if (ownData && !["transactions", "accounts"].includes(page)) {
       setPage("transactions");
@@ -520,6 +543,7 @@ export default function App() {
       current.company.id === company ? current : emptyData,
     );
     setDocuments([]);
+    setPeriodActivity([]);
     setReport(null);
     Promise.allSettled([
       api(base + "/bootstrap").then((master) => {
@@ -531,14 +555,34 @@ export default function App() {
       ).then((docs) => {
         if (active) setDocuments(docs);
       }),
+      (period && can("transactions.view")
+        ? api(`${base}/period-activity?${periodSearch}`)
+        : Promise.resolve([])
+      ).then((rows) => {
+        if (active) setPeriodActivity(rows);
+      }),
       (ownData && can("transactions.view")
-        ? api(base + "/my-cash").then((cash) => ({
+        ? api(
+            base + "/my-cash" + (periodSearch ? `?${periodSearch}` : ""),
+          ).then((cash) => ({
             trial: cash,
             cashPosition: cash,
+            ...(period ? { period, balances: { accounts: cash } } : {}),
           }))
-        : can("reports.view") || can("dashboard.view")
-          ? api(`${base}/reports?from=${from}&to=${to}`)
-          : Promise.resolve(null)
+        : period && can("transactions.view") && !can("reports.view")
+          ? Promise.all([
+              api(`${base}/period-balances?${periodSearch}`),
+              can("dashboard.view")
+                ? api(`${base}/reports?${periodSearch}`)
+                : Promise.resolve(null),
+            ]).then(([balances, overview]) => ({
+              ...overview,
+              ...balances,
+              summary: { ...overview?.summary, ...balances.summary },
+            }))
+          : can("reports.view") || can("dashboard.view")
+            ? api(`${base}/reports?${periodSearch || `from=${from}&to=${to}`}`)
+            : Promise.resolve(null)
       ).then((rep) => {
         if (active) setReport(rep);
       }),
@@ -558,7 +602,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [company, user, refresh, from, to]);
+  }, [company, user, refresh, from, to, periodSearch]);
   const changePage = (next: string) => {
     setPage(next);
     setQuery("");
@@ -679,8 +723,27 @@ export default function App() {
       </div>
     );
   if (!user) return <Login onLogin={() => initial(true)} />;
-  const totalPending = documents.filter((d) => d.status === "pending").length;
-  const filteredDocs = documents.filter(
+  const displayedDocuments = period ? periodActivity : documents;
+  const currentReport =
+    report &&
+    (!period ||
+      (report.period?.from === period.from && report.period?.to === period.to))
+      ? report
+      : null;
+  const selectDocument = (row: Row) => {
+    const current = documents.find((document) => document.id === row.id);
+    if (!current) {
+      setError(
+        "Current transaction details are unavailable. Refresh data and try again.",
+      );
+      return;
+    }
+    setSelected(current);
+  };
+  const totalPending = displayedDocuments.filter(
+    (d) => d.status === "pending" && d.activity_type !== "reversal",
+  ).length;
+  const filteredDocs = displayedDocuments.filter(
     (d) =>
       !query ||
       [d.description, d.reference, d.contact_name, d.id, kindLabels[d.kind]]
@@ -881,7 +944,22 @@ export default function App() {
           ) : (
             <>
               {loading && <div className="loading-bar" />}
-              {["dashboard", "reports"].includes(page) && (
+              {period &&
+                [
+                  "dashboard",
+                  "transactions",
+                  "accounts",
+                  "chart",
+                  "receivables",
+                  "payables",
+                  "reports",
+                ].includes(page) && (
+                  <PeriodSelector
+                    value={financialPeriod.value}
+                    onChange={financialPeriod.change}
+                  />
+                )}
+              {!period && ["dashboard", "reports"].includes(page) && (
                 <div className="filterbar">
                   <div className="date-range">
                     <span>
@@ -909,26 +987,28 @@ export default function App() {
               )}
               {page === "dashboard" && (
                 <Dashboard
-                  report={report}
-                  documents={documents.filter(
-                    (d) => d.date >= from && d.date <= to,
+                  report={currentReport}
+                  loading={loading}
+                  documents={displayedDocuments.filter(
+                    (d) => d.date >= viewFrom && d.date <= viewTo,
                   )}
                   data={data}
                   can={can}
                   openTransaction={openTransaction}
-                  onSelect={setSelected}
+                  onSelect={selectDocument}
                   onPage={changePage}
-                  from={from}
-                  to={to}
+                  from={viewFrom}
+                  to={viewTo}
                 />
               )}
               {page === "transactions" && (
                 <Transactions
-                  key={`${company}-${user.id}`}
+                  key={`${company}-${user.id}-${periodKey}`}
+                  period={period || undefined}
                   rows={filteredDocs}
                   query={query}
                   setQuery={setQuery}
-                  onSelect={setSelected}
+                  onSelect={selectDocument}
                   can={can}
                   data={data}
                   companies={companies}
@@ -946,10 +1026,11 @@ export default function App() {
               {["accounts", "chart", "categories"].includes(page) && (
                 <MasterPage
                   key={`${company}-${page}-${masterRevision}`}
+                  period={period || undefined}
                   page={page}
                   ownData={ownData}
                   data={data}
-                  report={report}
+                  report={currentReport}
                   can={can}
                   onEdit={(table, row) =>
                     setModal({ type: "master", table, row })
@@ -961,21 +1042,33 @@ export default function App() {
                   page={page}
                   ownData={ownData}
                   documents={documents}
+                  periodDocuments={
+                    period
+                      ? periodActivity.filter(
+                          (row) => row.activity_type !== "reversal",
+                        )
+                      : undefined
+                  }
+                  report={currentReport}
+                  period={period || undefined}
                   data={data}
                   can={can}
                   onEdit={(row) =>
                     setModal({ type: "master", table: "contacts", row })
                   }
                   onNew={openTransaction}
-                  onSelect={setSelected}
+                  onSelect={selectDocument}
                 />
               )}
               {page === "reports" && (
-                <Reports
-                  report={report}
+                <PeriodReports
+                  report={currentReport}
                   documents={documents}
                   data={data}
-                  to={to}
+                  to={viewTo}
+                  from={viewFrom}
+                  periodLabel={period?.label}
+                  exportRows={exportCSV}
                 />
               )}
               {page === "audit" && <Audit base={base} refresh={refresh} />}
@@ -1119,13 +1212,16 @@ export default function App() {
             closeModal();
             reload();
             setSelected(doc);
-            notify("Transaction saved as pending");
+            notify(
+              `Transaction saved as pending${period && (doc.date < period.from || doc.date > period.to) ? ` · Its date is outside ${period.label}; switch periods to see it in the list.` : ""}`,
+            );
           }}
         />
       )}
       {selected && (
         <DocumentDetail
           doc={documents.find((d) => d.id === selected.id) || selected}
+          period={period || undefined}
           data={data}
           base={base}
           user={user}
@@ -1375,6 +1471,7 @@ function CompanyModal({
 
 function Dashboard({
   report,
+  loading,
   documents,
   data,
   can,
@@ -1385,6 +1482,7 @@ function Dashboard({
   to,
 }: {
   report: Row | null;
+  loading: boolean;
   documents: Row[];
   data: Data;
   can: (p: string) => boolean;
@@ -1417,6 +1515,19 @@ function Dashboard({
       .sort((a: Row, b: Row) => Number(b.balance) - Number(a.balance))
       .slice(0, 5),
     maxExpense = Math.max(...expenses.map((r: Row) => Number(r.balance)), 1);
+  if (!report)
+    return (
+      <section className="card">
+        <Empty
+          title={
+            loading
+              ? "Loading financial overview"
+              : "Financial overview unavailable"
+          }
+          text="Balances will appear when the selected period has loaded. Use Refresh data to retry if needed."
+        />
+      </section>
+    );
   return (
     <>
       <div className="stats-grid">
@@ -1432,7 +1543,21 @@ function Dashboard({
                 <I size={19} />
               </div>
               <strong>{money(amount)}</strong>
-              <small>{sub as string}</small>
+              <small>
+                {report?.period
+                  ? `C/F · As of ${dateLabel(to)}`
+                  : (sub as string)}
+              </small>
+              {report?.period && (
+                <small>
+                  B/F{" "}
+                  {money(
+                    report.openingSummary?.[
+                      ["bank", "cash", "receivable", "payable"][i]
+                    ],
+                  )}
+                </small>
+              )}
             </div>
           );
         })}
@@ -1443,7 +1568,7 @@ function Dashboard({
             <div>
               <h2>Income & expenses</h2>
               <p>
-                {dateLabel(from)} — {dateLabel(to)}
+                During selected period · {dateLabel(from)} — {dateLabel(to)}
               </p>
             </div>
             <span className="muted-label">PKR</span>
@@ -1723,7 +1848,11 @@ function TransactionTable({
         </thead>
         <tbody>
           {sortedRows.map((d) => (
-            <tr key={d.id} onClick={() => onSelect(d)} className="clickable">
+            <tr
+              key={d.activity_id || d.id}
+              onClick={() => onSelect(d)}
+              className="clickable"
+            >
               <td>
                 <div className="transaction-cell">
                   <span
@@ -1755,7 +1884,10 @@ function TransactionTable({
                     )}
                   </span>
                   <div>
-                    <strong>{d.description}</strong>
+                    <strong>
+                      {d.activity_type === "reversal" ? "Reversal · " : ""}
+                      {d.description}
+                    </strong>
                     <small>
                       #{String(d.id).padStart(5, "0")} · {kindLabels[d.kind]}
                       {d.inbound ? " · Incoming" : ""}
@@ -1789,6 +1921,7 @@ function TransactionTable({
 }
 function MasterPage({
   page,
+  period,
   ownData = false,
   data,
   report,
@@ -1796,6 +1929,7 @@ function MasterPage({
   onEdit,
 }: {
   page: string;
+  period?: ResolvedPeriod;
   ownData?: boolean;
   data: Data;
   report: Row | null;
@@ -1824,6 +1958,9 @@ function MasterPage({
     report?.trial?.find((a: Row) => a.id === row.id)?.balance ??
     report?.cashPosition?.find((a: Row) => a.id === row.id)?.balance ??
     0;
+  const periodBalance = (row: Row, field: string) =>
+    report?.balances?.accounts?.find((a: Row) => a.id === row.id)?.[field] ??
+    "0.00";
   const sortValues: Record<
     string,
     (row: Row) => string | number | null | undefined
@@ -1832,6 +1969,10 @@ function MasterPage({
     type: (row) => title(page === "accounts" ? row.purpose : row.type),
     currency: (row) => row.currency,
     balance,
+    opening: (row) => periodBalance(row, "opening"),
+    debit: (row) => periodBalance(row, "debit"),
+    credit: (row) => periodBalance(row, "credit"),
+    closing: (row) => periodBalance(row, "closing"),
     parent: (row) =>
       data.categories.find((c) => c.id === row.parent_id)?.name || "Top level",
     account: (row) => data.accounts.find((a) => a.id === row.account_id)?.name,
@@ -1844,7 +1985,16 @@ function MasterPage({
           filteredRows,
           sortValues[sort.key],
           sort.direction,
-          ["balance", "position"].includes(sort.key) ? "number" : "text",
+          [
+            "balance",
+            "position",
+            "opening",
+            "debit",
+            "credit",
+            "closing",
+          ].includes(sort.key)
+            ? "number"
+            : "text",
         )
       : filteredRows;
   const header = (key: string, label: string, numeric = false) => (
@@ -1871,6 +2021,13 @@ function MasterPage({
             {query ? `${rows.length} of ${visibleRows.length}` : rows.length}{" "}
             records · {rows.filter((r) => r.active).length} active
           </p>
+          {period && table === "accounts" && (
+            <p>
+              B/F before {dateLabel(period.from)} · Movements during selected
+              period · C/F as of {dateLabel(period.to)} · Negative balances
+              indicate credit balances.
+            </p>
+          )}
           {page === "chart" && (
             <p>
               Expense accounts can be used directly in transactions. Add a
@@ -1933,8 +2090,31 @@ function MasterPage({
         )}
         <button
           className="button secondary compact"
-          disabled={!rows.length}
-          onClick={() => exportCSV(page, rows)}
+          disabled={
+            !rows.length ||
+            (!!period && table === "accounts" && !report?.balances?.accounts)
+          }
+          onClick={() =>
+            exportCSV(
+              period ? `${page}-${period.from}-${period.to}` : page,
+              period && table === "accounts"
+                ? rows.map((row) => ({
+                    ...row,
+                    period: period.label,
+                    from: period.from,
+                    to: period.to,
+                    opening_pkr: periodBalance(row, "opening"),
+                    debit_pkr: periodBalance(row, "debit"),
+                    credit_pkr: periodBalance(row, "credit"),
+                    closing_pkr: periodBalance(row, "closing"),
+                    nominal_opening: periodBalance(row, "nominal_opening"),
+                    nominal_debit: periodBalance(row, "nominal_debit"),
+                    nominal_credit: periodBalance(row, "nominal_credit"),
+                    nominal_closing: periodBalance(row, "nominal_closing"),
+                  }))
+                : rows,
+            )
+          }
         >
           <Download size={16} />
           Export
@@ -1950,8 +2130,17 @@ function MasterPage({
                   <>
                     {header("type", "Type")}
                     {header("currency", "Currency")}
-                    {page === "accounts" &&
-                      header("balance", "Balance · PKR", true)}
+                    {period ? (
+                      <>
+                        {header("opening", "B/F · PKR", true)}
+                        {header("debit", "Debits · PKR", true)}
+                        {header("credit", "Credits · PKR", true)}
+                        {header("closing", "C/F · PKR", true)}
+                      </>
+                    ) : (
+                      page === "accounts" &&
+                      header("balance", "Balance · PKR", true)
+                    )}
                   </>
                 )}
                 {table === "categories" && (
@@ -1984,11 +2173,31 @@ function MasterPage({
                     <>
                       <td>{title(page === "accounts" ? r.purpose : r.type)}</td>
                       <td>{r.currency}</td>
-                      {page === "accounts" && (
-                        <td className="align-right amount">
-                          {money(balance(r))}
-                        </td>
-                      )}
+                      {period
+                        ? ["opening", "debit", "credit", "closing"].map(
+                            (field) => (
+                              <td className="align-right amount" key={field}>
+                                {report
+                                  ? formatLedgerAmount(periodBalance(r, field))
+                                  : "—"}
+                                {r.currency !== "PKR" && (
+                                  <small>
+                                    {r.currency}{" "}
+                                    {report
+                                      ? formatLedgerAmount(
+                                          periodBalance(r, `nominal_${field}`),
+                                        )
+                                      : "—"}
+                                  </small>
+                                )}
+                              </td>
+                            ),
+                          )
+                        : page === "accounts" && (
+                            <td className="align-right amount">
+                              {money(balance(r))}
+                            </td>
+                          )}
                     </>
                   )}
                   {table === "categories" && (
@@ -2289,6 +2498,9 @@ function PeoplePage({
   page,
   ownData = false,
   documents,
+  periodDocuments,
+  report,
+  period,
   data,
   can,
   onEdit,
@@ -2298,6 +2510,9 @@ function PeoplePage({
   page: string;
   ownData?: boolean;
   documents: Row[];
+  periodDocuments?: Row[];
+  report: Row | null;
+  period?: ResolvedPeriod;
   data: Data;
   can: (s: string) => boolean;
   onEdit: (r: Row) => void;
@@ -2314,16 +2529,35 @@ function PeoplePage({
   const kind = page === "receivables" ? "customer" : "vendor",
     docKinds =
       page === "receivables" ? ["invoice"] : ["bill", "asset_purchase"];
-  const rows = documents.filter(
+  const rows = (periodDocuments || documents).filter(
     (d) =>
       !d.inbound &&
       docKinds.includes(d.kind) &&
       (d.kind !== "asset_purchase" || !d.source_id),
   );
-  const outstanding = rows.filter(
-    (d) => d.status === "posted" && Number(d.amount) > Number(d.allocated),
-  );
+  const outstanding: Row[] = period
+    ? (page === "receivables"
+        ? report?.agingReceivables
+        : report?.agingPayables) || []
+    : rows.filter(
+        (d) => d.status === "posted" && Number(d.amount) > Number(d.allocated),
+      );
   const people = data.contacts.filter((c) => c.kind === kind);
+  const financialReady =
+    !period ||
+    (Array.isArray(report?.agingReceivables) &&
+      Array.isArray(report?.agingPayables) &&
+      Array.isArray(report?.balances?.contacts));
+  const controlKey = page === "receivables" ? "receivable" : "payable";
+  const contactBalance = (id: number, field: string) =>
+    (report?.balances?.contacts || [])
+      .filter((row: Row) => row.contact_id === id && row.purpose === controlKey)
+      .reduce(
+        (total: Decimal, row: Row) => total.plus(row[field]),
+        new Decimal(0),
+      )
+      .times(page === "payables" ? -1 : 1)
+      .toFixed(2);
   const remainingAmount = (row: Row) =>
     new Decimal(row.amount).minus(row.allocated || 0).toString();
   const sortedPeople = peopleSort
@@ -2365,21 +2599,37 @@ function PeoplePage({
   return (
     <>
       <div className="mini-stats">
+        {period && (
+          <div className="card">
+            <span>B/F · before {dateLabel(period.from)}</span>
+            <strong>
+              {report ? money(report.openingSummary?.[controlKey]) : "—"}
+            </strong>
+          </div>
+        )}
         <div className="card">
-          <span>Outstanding · PKR equivalent</span>
+          <span>
+            {period
+              ? `C/F · As of ${dateLabel(period.to)}`
+              : "Outstanding · PKR equivalent"}
+          </span>
           <strong>
-            {money(
-              outstanding.reduce(
-                (s, d) =>
-                  s + Number(d.base_amount) - Number(d.allocated_base || 0),
-                0,
-              ),
-            )}
+            {period
+              ? report
+                ? money(report.summary?.[controlKey])
+                : "—"
+              : money(
+                  outstanding.reduce(
+                    (s, d) =>
+                      s + Number(d.base_amount) - Number(d.allocated_base || 0),
+                    0,
+                  ),
+                )}
           </strong>
         </div>
         <div className="card">
           <span>Open {page === "payables" ? "bills" : "invoices"}</span>
-          <strong>{outstanding.length}</strong>
+          <strong>{financialReady ? outstanding.length : "—"}</strong>
         </div>
         <div className="card">
           <span>{title(kind)} records</span>
@@ -2392,7 +2642,11 @@ function PeoplePage({
             <h2>
               {page === "payables" ? "Vendor balances" : "Client balances"}
             </h2>
-            <p>Follow each document from creation to settlement.</p>
+            <p>
+              {period
+                ? `Balances as of ${dateLabel(period.to)} include older unpaid documents. Payment actions use the current outstanding balance.`
+                : "Follow each document from creation to settlement."}
+            </p>
           </div>
           {can("transactions.create") && (
             <button className="button compact" onClick={() => onNew(create)}>
@@ -2416,6 +2670,40 @@ function PeoplePage({
             </button>
           ))}
         </div>
+        {period && (
+          <div className="table-toolbar">
+            <span className="subtle">
+              {period.label} · Amounts in PKR except document currency amounts
+            </span>
+            <button
+              className="button secondary compact"
+              disabled={!financialReady}
+              onClick={() =>
+                exportCSV(
+                  `${page}-${period.from}-${period.to}`,
+                  (tab === "people"
+                    ? people.map((person) => ({
+                        id: person.id,
+                        name: person.name,
+                        opening_pkr: contactBalance(person.id, "opening"),
+                        closing_pkr: contactBalance(person.id, "closing"),
+                      }))
+                    : tab === "all"
+                      ? rows
+                      : outstanding
+                  ).map((row) => ({
+                    ...row,
+                    period: period.label,
+                    from: period.from,
+                    to: period.to,
+                  })),
+                )
+              }
+            >
+              <Download size={16} /> Export
+            </button>
+          </div>
+        )}
         {tab === "people" ? (
           <>
             <div className="table-toolbar">
@@ -2451,6 +2739,12 @@ function PeoplePage({
                           }
                         />
                       ))}
+                      {period && (
+                        <>
+                          <th className="align-right">B/F · PKR</th>
+                          <th className="align-right">C/F · PKR</th>
+                        </>
+                      )}
                       <th />
                     </tr>
                   </thead>
@@ -2465,6 +2759,24 @@ function PeoplePage({
                         <td>
                           <Badge status={c.active ? "active" : "disabled"} />
                         </td>
+                        {period && (
+                          <>
+                            <td className="align-right amount">
+                              {financialReady
+                                ? formatLedgerAmount(
+                                    contactBalance(c.id, "opening"),
+                                  )
+                                : "—"}
+                            </td>
+                            <td className="align-right amount">
+                              {financialReady
+                                ? formatLedgerAmount(
+                                    contactBalance(c.id, "closing"),
+                                  )
+                                : "—"}
+                            </td>
+                          </>
+                        )}
                         <td>
                           {can("masters.manage") && (
                             <button
@@ -2530,7 +2842,9 @@ function PeoplePage({
                     <td>
                       <span
                         className={
-                          d.due_date && d.due_date < today() ? "negative" : ""
+                          d.due_date && d.due_date < (period?.to || today())
+                            ? "negative"
+                            : ""
                         }
                       >
                         {dateLabel(d.due_date)}
@@ -2552,8 +2866,12 @@ function PeoplePage({
           </div>
         ) : (
           <Empty
-            title="All clear"
-            text="There are no outstanding posted documents in this company."
+            title={financialReady ? "All clear" : "Period balances unavailable"}
+            text={
+              financialReady
+                ? "There are no outstanding posted documents as of the selected date."
+                : "Balances are loading or could not be retrieved. Use Refresh data to retry."
+            }
           />
         )}
       </section>
@@ -3202,6 +3520,7 @@ function TransactionModal({
 
 function DocumentDetail({
   doc,
+  period,
   data,
   base,
   user,
@@ -3212,6 +3531,7 @@ function DocumentDetail({
   onSettle,
 }: {
   doc: Row;
+  period?: ResolvedPeriod;
   data: Data;
   base: string;
   user: User;
@@ -3327,6 +3647,14 @@ function DocumentDetail({
         <Badge status={doc.status} />
       </div>
       <h3 className="document-description">{doc.description}</h3>
+      {period && (
+        <p className="subtle">
+          Full transaction history · Status and available actions are current.
+          {doc.date < period.from || doc.date > period.to
+            ? ` Original transaction date is outside ${period.label}.`
+            : ""}
+        </p>
+      )}
       <TransactionLedger
         key={`${base}/${doc.id}`}
         base={base}
@@ -3334,6 +3662,7 @@ function DocumentDetail({
         status={doc.status}
         companyName={data.company.name}
         request={api}
+        period={period}
       />
       <h3 className="transaction-details-heading">Transaction details</h3>
       <dl className="detail-grid">
@@ -3565,335 +3894,6 @@ function DocumentDetail({
   );
 }
 
-function Reports({
-  report,
-  documents,
-  data,
-  to,
-}: {
-  report: Row | null;
-  documents: Row[];
-  data: Data;
-  to: string;
-}) {
-  const [type, setType] = useState("profit"),
-    [account, setAccount] = useState(""),
-    [contact, setContact] = useState("");
-  const [sort, setSort] = useState<SortState | null>(null);
-  useEffect(() => setSort(null), [data.company.id]);
-  const types = [
-    ["profit", "Profit & loss"],
-    ["balance", "Balance sheet"],
-    ["cashflow", "Cash flow"],
-    ["trial", "Trial balance"],
-    ["ledger", "General ledger"],
-    ["journal", "Journal"],
-    ["category", "Expenses by category"],
-    ["employee_expenses", "Expense by employee"],
-    ["employee_cash", "Cash by employee"],
-    ["cash", "Cash position"],
-    ["bank", "Bank statement"],
-    ["receivables", "Receivables aging"],
-    ["payables", "Payables aging"],
-    ["contact", "Client / vendor statement"],
-    ["intercompany", "Inter-company statement"],
-  ];
-  if (!report)
-    return (
-      <div className="card">
-        <Empty
-          title="Reports are loading"
-          text="Your posted accounting records will appear here."
-        />
-      </div>
-    );
-  let rows: Row[] = [],
-    columns: [string, string, string?][] = [
-      ["name", "Account"],
-      ["debit", "Debit", "money"],
-      ["credit", "Credit", "money"],
-      ["balance", "Balance", "money"],
-    ];
-  if (type === "profit") {
-    rows = (report.activity || [])
-      .filter((r: Row) => ["revenue", "expense"].includes(r.type))
-      .map((r: Row) => ({
-        ...r,
-        amount: r.type === "revenue" ? -Number(r.balance) : Number(r.balance),
-      }));
-    columns = [
-      ["name", "Account"],
-      ["type", "Type"],
-      ["amount", "Amount", "money"],
-    ];
-  } else if (type === "balance") {
-    rows = [
-      ...(report.balanceSheet?.assets || []),
-      ...(report.balanceSheet?.liabilities || []),
-      ...(report.balanceSheet?.equity || []),
-    ].map((r) => ({
-      ...r,
-      balance: r.type === "asset" ? Number(r.balance) : -Number(r.balance),
-    }));
-    rows.push({
-      id: "earnings",
-      name: "Current retained earnings",
-      type: "equity",
-      balance: report.balanceSheet?.earnings || 0,
-    });
-    columns = [
-      ["name", "Account"],
-      ["type", "Type"],
-      ["balance", "Balance", "money"],
-    ];
-  } else if (type === "trial") rows = report.trial || [];
-  else if (type === "cashflow") rows = report.cashFlow || [];
-  else if (type === "category") rows = report.byCategory || [];
-  else if (type === "employee_expenses") rows = report.expenseByEmployee || [];
-  else if (type === "employee_cash") rows = report.cashByEmployee || [];
-  else if (type === "cash") rows = report.cashPosition || [];
-  else if (type === "intercompany") {
-    rows = report.intercompany || [];
-    columns = [
-      ["name", "Counterparty company"],
-      ["debit", "Due from movement", "money"],
-      ["credit", "Due to movement", "money"],
-      ["balance", "Net due from / (to)", "money"],
-    ];
-  } else if (
-    ["ledger", "journal", "bank", "contact", "intercompany"].includes(type)
-  ) {
-    rows = (report.ledger || []).filter(
-      (r: Row) =>
-        (!account || r.account_id === Number(account)) &&
-        (!contact || r.contact_id === Number(contact)) &&
-        (type !== "bank" || r.purpose === "bank") &&
-        (type !== "contact" || ["receivable", "payable"].includes(r.purpose)) &&
-        (type !== "intercompany" || ["due_from", "due_to"].includes(r.purpose)),
-    );
-    columns = [
-      ["date", "Date", "date"],
-      ["document_id", "Document"],
-      ["account_name", "Account"],
-      ["description", "Description"],
-      ["contact_name", "Contact"],
-      ["debit", "Debit", "money"],
-      ["credit", "Credit", "money"],
-    ];
-  } else if (type === "receivables" || type === "payables") {
-    const supplied =
-      type === "receivables" ? report.agingReceivables : report.agingPayables;
-    rows =
-      supplied ||
-      documents
-        .filter(
-          (d) =>
-            d.status === "posted" &&
-            Number(d.amount) > Number(d.allocated) &&
-            (type === "receivables"
-              ? d.kind === "invoice"
-              : d.kind === "bill" ||
-                (d.kind === "asset_purchase" && !d.source_id)),
-        )
-        .map((d) => {
-          const days = d.due_date
-            ? Math.max(
-                0,
-                Math.floor(
-                  (Date.parse(to) - Date.parse(d.due_date)) / 86400000,
-                ),
-              )
-            : 0;
-          return {
-            ...d,
-            outstanding: Number(d.amount) - Number(d.allocated),
-            bucket:
-              days === 0
-                ? "Current"
-                : days <= 30
-                  ? "1–30 days"
-                  : days <= 60
-                    ? "31–60 days"
-                    : days <= 90
-                      ? "61–90 days"
-                      : "90+ days",
-          };
-        });
-    columns = [
-      ["id", "Document"],
-      ["contact_name", "Contact"],
-      ["due_date", "Due date", "date"],
-      ["currency", "Currency"],
-      ["outstanding", "Outstanding", "number"],
-      ["bucket", "Aging"],
-    ];
-  }
-  const sortColumn = columns.find(([key]) => key === sort?.key);
-  if (sort && sortColumn) {
-    const [key, , format] = sortColumn;
-    const sortType: SortType =
-      format === "date"
-        ? "date"
-        : format === "money" ||
-            format === "number" ||
-            ["id", "document_id"].includes(key)
-          ? "number"
-          : "text";
-    // Retained earnings is a computed summary and stays beneath the account rows.
-    const summaries =
-      type === "balance" ? rows.filter((row) => row.id === "earnings") : [];
-    const details =
-      type === "balance" ? rows.filter((row) => row.id !== "earnings") : rows;
-    rows = [
-      ...sortRows(details, (row) => row[key], sort.direction, sortType),
-      ...summaries,
-    ];
-  }
-  return (
-    <section className="card">
-      <div className="report-toolbar">
-        <SearchableSelect
-          aria-label="Report"
-          value={type}
-          onChange={(value) => {
-            setType(value);
-            setAccount("");
-            setContact("");
-            setSort(null);
-          }}
-          options={types.map(([value, label]) => ({ value, label }))}
-        />
-        {["ledger", "bank", "journal"].includes(type) && (
-          <Select
-            aria-label="Report account"
-            value={account}
-            onChange={setAccount}
-            options={data.accounts.filter(
-              (a) => type !== "bank" || a.purpose === "bank",
-            )}
-            placeholder="All accounts"
-          />
-        )}
-        {type === "contact" && (
-          <Select
-            aria-label="Report contact"
-            value={contact}
-            onChange={setContact}
-            options={data.contacts}
-            placeholder="All contacts"
-          />
-        )}
-        <button
-          className="button secondary compact"
-          disabled={!rows.length}
-          onClick={() =>
-            exportCSV(types.find(([k]) => k === type)?.[1] || type, rows)
-          }
-        >
-          <Download size={16} />
-          Export CSV
-        </button>
-        <button
-          className="button secondary compact"
-          onClick={() => window.print()}
-        >
-          Print / PDF
-        </button>
-      </div>
-      <div className="report-heading">
-        <span className="eyebrow">{data.company.name}</span>
-        <h2>{types.find(([k]) => k === type)?.[1]}</h2>
-        <p>
-          As of {dateLabel(to)} · Base currency PKR
-          {["receivables", "payables"].includes(type)
-            ? " · Outstanding shown in document currency"
-            : ""}
-        </p>
-      </div>
-      {rows.length ? (
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                {columns.map(([k, label, format]) => (
-                  <SortHeader
-                    key={k}
-                    column={k}
-                    label={label}
-                    sort={sort}
-                    numeric={format === "money" || format === "number"}
-                    onSort={(key) =>
-                      setSort((current) => nextSort(current, key))
-                    }
-                  />
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={String(r.id || "") + i}>
-                  {columns.map(([k, , format]) => (
-                    <td
-                      key={k}
-                      className={
-                        format === "money" || format === "number"
-                          ? "align-right amount"
-                          : ""
-                      }
-                    >
-                      {format === "money"
-                        ? money(r[k])
-                        : format === "number"
-                          ? num(r[k])
-                          : format === "date"
-                            ? dateLabel(r[k])
-                            : (r[k] ?? "—")}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <Empty
-          title="No activity for this report"
-          text="Try another date range or post a transaction to see it here."
-        />
-      )}
-      {type === "profit" && (
-        <div className="report-total">
-          <strong>Net profit / loss</strong>
-          <strong>{money(report.summary?.profit)}</strong>
-        </div>
-      )}
-      {type === "trial" && (
-        <div className="report-total">
-          <strong>Total debits / credits</strong>
-          <span>
-            {money(
-              (report.trial || [])
-                .reduce(
-                  (total: Decimal, row: Row) => total.plus(row.debit || 0),
-                  new Decimal(0),
-                )
-                .toString(),
-            )}{" "}
-            /{" "}
-            {money(
-              (report.trial || [])
-                .reduce(
-                  (total: Decimal, row: Row) => total.plus(row.credit || 0),
-                  new Decimal(0),
-                )
-                .toString(),
-            )}
-          </span>
-        </div>
-      )}
-    </section>
-  );
-}
 function Audit({ base, refresh }: { base: string; refresh: number }) {
   const [rows, setRows] = useState<Row[]>([]),
     [error, setError] = useState(""),

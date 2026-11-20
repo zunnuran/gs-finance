@@ -1,5 +1,6 @@
 import type { Connection } from "./db";
 import type { DocumentInput } from "../shared/domain";
+import type { ResolvedPeriod } from "../shared/period";
 
 type Actor = { id: number; dataScope: "own" | "company" };
 export const denyScope = (): never => {
@@ -133,13 +134,30 @@ export async function ownCashBalances(
   c: Connection,
   actor: Actor,
   company: number,
+  period?: Pick<ResolvedPeriod, "from" | "to"> | null,
 ) {
   return (
     await c.query(
       `SELECT a.id,a.name,a.name account_name,a.code,a.type,a.purpose,a.currency,
-    COALESCE(sum(l.debit-l.credit),0)::text balance,COALESCE(sum(l.foreign_amount),0)::text nominal_balance
-    FROM accounts a LEFT JOIN journal_lines l ON l.account_id=a.id WHERE a.id IN (${ownCash}) GROUP BY a.id ORDER BY a.id`,
-      [company, actor.id],
+    COALESCE(sum(l.debit-l.credit),0)::text balance,
+    COALESCE(sum(l.debit-l.credit),0)::text closing,
+    COALESCE(sum(l.foreign_amount),0)::text nominal_balance,
+    COALESCE(sum(l.foreign_amount),0)::text nominal_closing,
+    COALESCE(sum(l.debit-l.credit) FILTER (WHERE j.date<$3::date),0)::text opening,
+    COALESCE(sum(l.debit) FILTER (WHERE j.date>=$3::date),0)::text debit,
+    COALESCE(sum(l.credit) FILTER (WHERE j.date>=$3::date),0)::text credit,
+    COALESCE(sum(l.foreign_amount) FILTER (WHERE j.date<$3::date),0)::text nominal_opening,
+    COALESCE(sum(GREATEST(l.foreign_amount,0)) FILTER (WHERE j.date>=$3::date),0)::text nominal_debit,
+    COALESCE(sum(GREATEST(-l.foreign_amount,0)) FILTER (WHERE j.date>=$3::date),0)::text nominal_credit
+    FROM accounts a LEFT JOIN (journal_lines l JOIN journals j ON j.id=l.journal_id AND j.date<=$4::date)
+    ON l.account_id=a.id AND l.company_id=a.company_id
+    WHERE a.id IN (${ownCash}) GROUP BY a.id ORDER BY a.id`,
+      [
+        company,
+        actor.id,
+        period?.from || "0001-01-01",
+        period?.to || "9999-12-31",
+      ],
     )
   ).rows;
 }

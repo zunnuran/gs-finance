@@ -1,5 +1,6 @@
 import type { Connection } from "./db";
 import Decimal from "decimal.js";
+const Money = Decimal.clone({ precision: 40 });
 const sum = (rows: any[], get: (r: any) => Decimal.Value) =>
   rows.reduce((s, r) => s.plus(get(r)), new Decimal(0));
 const net = (r: any) => new Decimal(r.debit).minus(r.credit);
@@ -12,7 +13,7 @@ export async function reports(
 ) {
   const rows = (
     await c.query(
-      `SELECT l.*,j.date,j.document_id,j.reversal_of,a.code,a.name account_name,a.type,a.purpose,d.kind,d.description,d.reference,d.other_company_id,d.company_id origin_company_id,related.kind related_kind,EXISTS(SELECT 1 FROM assets fa WHERE fa.document_id=related.id) related_asset,ct.name contact_name,p.name project_name,CASE WHEN a.purpose='fx' THEN a.name ELSE COALESCE(cat.name,a.name) END category_name,emp.name employee_name,cust.name custodian_name,CASE WHEN d.company_id=$1 THEN peer.name ELSE origin.name END peer_name
+      `SELECT l.*,j.date,j.document_id,j.reversal_of,a.code,a.name account_name,a.type,a.purpose,a.currency account_currency,a.custodian_id,d.kind,d.description,d.reference,d.other_company_id,d.company_id origin_company_id,related.kind related_kind,EXISTS(SELECT 1 FROM assets fa WHERE fa.document_id=related.id) related_asset,ct.name contact_name,p.name project_name,CASE WHEN a.purpose='fx' THEN a.name ELSE COALESCE(cat.name,a.name) END category_name,emp.name employee_name,cust.name custodian_name,CASE WHEN d.company_id=$1 THEN peer.name ELSE origin.name END peer_name,CASE WHEN d.company_id=$1 THEN peer.id ELSE origin.id END peer_id
     FROM journal_lines l JOIN journals j ON j.id=l.journal_id JOIN accounts a ON a.id=l.account_id JOIN documents d ON d.id=j.document_id LEFT JOIN documents related ON related.id=d.related_id LEFT JOIN contacts ct ON ct.id=l.contact_id LEFT JOIN projects p ON p.id=l.project_id LEFT JOIN companies peer ON peer.id=d.other_company_id LEFT JOIN companies origin ON origin.id=d.company_id LEFT JOIN categories cat ON cat.id=d.category_id LEFT JOIN contacts cust ON cust.id=a.custodian_id
     LEFT JOIN contacts emp ON emp.id=COALESCE(CASE WHEN ct.kind='employee' THEN ct.id END,(SELECT ac.custodian_id FROM journal_lines jl JOIN accounts ac ON ac.id=jl.account_id WHERE jl.journal_id=j.id AND ac.purpose='cash' AND ac.custodian_id IS NOT NULL LIMIT 1))
     WHERE l.company_id=$1 AND j.date<=$2 AND ($3::integer IS NULL OR l.project_id=$3) ORDER BY j.date,j.id,l.id`,
@@ -20,6 +21,87 @@ export async function reports(
     )
   ).rows;
   const period = rows.filter((r) => r.date >= from);
+  // Carry balances are read-time aggregates, never synthetic journal entries.
+  const balancesFor = (
+    entries: any[],
+    identify: (row: any) => Record<string, any>,
+  ) => {
+    const grouped = new Map<string, any>();
+    for (const row of entries) {
+      const identity = identify(row),
+        key = String(identity.id);
+      const entry = grouped.get(key) || {
+        ...identity,
+        opening: "0.00",
+        debit: "0.00",
+        credit: "0.00",
+        closing: "0.00",
+        nominal_opening: "0.00",
+        nominal_debit: "0.00",
+        nominal_credit: "0.00",
+        nominal_closing: "0.00",
+      };
+      const amount = new Money(row.debit).minus(row.credit);
+      // Account aggregates never add units of different currencies together.
+      const nominal = new Money(
+        row.currency === entry.currency ? row.foreign_amount : 0,
+      );
+      if (row.date < from) {
+        entry.opening = new Money(entry.opening).plus(amount).toFixed(2);
+        entry.nominal_opening = new Money(entry.nominal_opening)
+          .plus(nominal)
+          .toFixed(2);
+      } else {
+        entry.debit = new Money(entry.debit).plus(row.debit).toFixed(2);
+        entry.credit = new Money(entry.credit).plus(row.credit).toFixed(2);
+        entry.nominal_debit = new Money(entry.nominal_debit)
+          .plus(Money.max(nominal, 0))
+          .toFixed(2);
+        entry.nominal_credit = new Money(entry.nominal_credit)
+          .plus(Money.max(nominal.neg(), 0))
+          .toFixed(2);
+      }
+      entry.closing = new Money(entry.opening)
+        .plus(entry.debit)
+        .minus(entry.credit)
+        .toFixed(2);
+      entry.nominal_closing = new Money(entry.nominal_opening)
+        .plus(entry.nominal_debit)
+        .minus(entry.nominal_credit)
+        .toFixed(2);
+      grouped.set(key, entry);
+    }
+    return [...grouped.values()];
+  };
+  const accountBalances = balancesFor(rows, (r) => ({
+    id: r.account_id,
+    account_id: r.account_id,
+    name: r.account_name,
+    code: r.code,
+    type: r.type,
+    purpose: r.purpose,
+    currency: r.account_currency,
+  }));
+  const statementIdentity = (r: any) => ({
+    id: JSON.stringify([r.account_id, r.contact_id, r.currency]),
+    account_id: r.account_id,
+    contact_id: r.contact_id,
+    name: r.contact_name || "Unassigned",
+    account_name: r.account_name,
+    contact_name: r.contact_name,
+    code: r.code,
+    purpose: r.purpose,
+    type: r.type,
+    currency: r.currency,
+  });
+  const openingLedger = balancesFor(
+    rows.filter((r) => r.date < from),
+    statementIdentity,
+  );
+  const openingTotal = (purposes: string[]) =>
+    accountBalances
+      .filter((a) => purposes.includes(a.purpose))
+      .reduce((total, a) => total.plus(a.opening), new Money(0));
   const group = (data: any[], key: string) => {
     const map = new Map<any, any>();
     for (const r of data) {
@@ -156,6 +238,42 @@ export async function reports(
     })
     .filter((d) => new Decimal(d.outstanding).gt(0));
   return {
+    period: { mode: "custom", from, to, label: "Custom dates" },
+    openingSummary: {
+      bank: openingTotal(["bank"]).toFixed(2),
+      cash: openingTotal(["cash"]).toFixed(2),
+      receivable: openingTotal(["receivable"]).toFixed(2),
+      payable: openingTotal(["payable"]).neg().toFixed(2),
+      intercompany: openingTotal(["due_from", "due_to"]).toFixed(2),
+    },
+    balances: {
+      accounts: accountBalances,
+      contacts: balancesFor(
+        rows.filter((r) => ["receivable", "payable"].includes(r.purpose)),
+        statementIdentity,
+      ),
+      custodians: balancesFor(
+        rows.filter((r) => r.purpose === "cash"),
+        (r) => ({
+          id: JSON.stringify([r.custodian_id, r.currency]),
+          name: r.custodian_name || "Unassigned",
+          custodian_id: r.custodian_id,
+          currency: r.currency,
+          purpose: "cash",
+          type: "asset",
+        }),
+      ),
+      intercompany: balancesFor(
+        rows.filter((r) => ["due_from", "due_to"].includes(r.purpose)),
+        (r) => ({
+          id: JSON.stringify([r.peer_id, r.currency]),
+          name: r.peer_name || "Unassigned",
+          peer_id: r.peer_id,
+          currency: r.currency,
+        }),
+      ),
+    },
+    openingLedger,
     summary: {
       bank: total(["bank"]).toFixed(2),
       cash: total(["cash"]).toFixed(2),

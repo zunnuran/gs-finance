@@ -83,20 +83,20 @@ const timestamp = (value: string) =>
 const amount = (value: any) =>
   value == null
     ? "—"
-    : new Intl.NumberFormat("en-PK", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(Number(value));
-const outstandingAmount = (row: Row) =>
-  row.status === "posted" &&
-  (["bill", "invoice"].includes(row.kind) ||
-    (row.kind === "asset_purchase" && !row.source_id)) &&
-  !row.inbound
+    : new Decimal(value).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const outstandingAmount = (row: Row) => {
+  if (row.activity_type === "reversal") return null;
+  if (row.outstanding_as_of !== undefined) return row.outstanding_as_of;
+  return row.status === "posted" &&
+    (["bill", "invoice"].includes(row.kind) ||
+      (row.kind === "asset_purchase" && !row.source_id)) &&
+    !row.inbound
     ? Decimal.max(
         0,
         new Decimal(row.amount).minus(row.allocated || 0),
       ).toString()
     : null;
+};
 
 export function Transactions({
   rows,
@@ -115,6 +115,7 @@ export function Transactions({
   exportRows,
   kindLabels,
   ConfirmationModal,
+  period,
 }: {
   rows: Row[];
   query: string;
@@ -131,6 +132,7 @@ export function Transactions({
   request: (url: string, method?: string, body?: any) => Promise<any>;
   exportRows: (name: string, rows: Row[]) => void;
   kindLabels: Record<string, string>;
+  period?: { from: string; to: string; label: string };
   ConfirmationModal: ComponentType<{
     title: string;
     description?: string;
@@ -139,7 +141,7 @@ export function Transactions({
     busy?: boolean;
   }>;
 }) {
-  const [status, setStatus] = useState("pending");
+  const [status, setStatus] = useState(period ? "all" : "pending");
   const [kind, setKind] = useState("");
   const [columnQuery, setColumnQuery] = useState("");
   const [sort, setSort] = useState<SortState>({
@@ -188,17 +190,39 @@ export function Transactions({
     },
     {
       id: "date",
-      label: "Date",
+      label: period ? "Activity date" : "Date",
       value: (r) => date(r.date),
       sortValue: (r) => r.date,
       sortType: "date",
     },
+    ...(period
+      ? ([
+          {
+            id: "activity",
+            label: "Activity",
+            value: (r) =>
+              r.activity_type === "reversal" ? "Reversal" : "Transaction",
+          },
+          {
+            id: "document_date",
+            label: "Original transaction date",
+            value: (r) => date(r.document_date || r.date),
+            sortValue: (r) => r.document_date || r.date,
+            sortType: "date",
+          },
+        ] satisfies Column[])
+      : []),
     {
       id: "description",
       label: "Description / notes",
-      value: (r) => r.description || "—",
+      value: (r) =>
+        `${r.activity_type === "reversal" ? "Reversal · " : ""}${r.description || "—"}`,
     },
-    { id: "status", label: "Status", value: (r) => label(r.status) },
+    {
+      id: "status",
+      label: period ? "Current status" : "Status",
+      value: (r) => label(r.status),
+    },
     {
       id: "amount",
       label: "Amount",
@@ -263,7 +287,7 @@ export function Transactions({
     },
     {
       id: "outstanding",
-      label: "Outstanding",
+      label: period ? "Outstanding at period end" : "Outstanding",
       numeric: true,
       value: (r) => amount(outstandingAmount(r)),
       sortValue: outstandingAmount,
@@ -309,7 +333,10 @@ export function Transactions({
         const valid = columns
           .filter((c) => stored.includes(c.id))
           .map((c) => c.id);
-        if (valid.length) return valid;
+        if (valid.length)
+          return period
+            ? [...new Set([...valid, "activity", "document_date"])]
+            : valid;
       }
     } catch {
       /* Column preferences are optional. */
@@ -384,6 +411,7 @@ export function Transactions({
   };
   const isEligible = (row: Row) =>
     canPost &&
+    row.activity_type !== "reversal" &&
     row.status === "pending" &&
     !row.inbound &&
     !row.retired &&
@@ -413,11 +441,11 @@ export function Transactions({
     /REVIEW BEFORE POSTING/i.test(r.description || ""),
   ).length;
   const selectionTotals = useMemo(() => {
-    const totals = new Map<string, number>();
+    const totals = new Map<string, Decimal>();
     for (const row of selectedRows)
       totals.set(
         row.currency,
-        (totals.get(row.currency) || 0) + Number(row.amount),
+        (totals.get(row.currency) || new Decimal(0)).plus(row.amount),
       );
     return [...totals]
       .map(([currency, total]) => `${currency} ${amount(total)}`)
@@ -428,7 +456,7 @@ export function Transactions({
     setConfirming(false);
     setResult(null);
     setError("");
-  }, [query, status, kind, companyId, user.id]);
+  }, [query, status, kind, companyId, user.id, period?.from, period?.to]);
   useEffect(() => {
     const allowed = new Set(
       eligibleKey ? eligibleKey.split(",").map(Number) : [],
@@ -478,13 +506,22 @@ export function Transactions({
             className={status === s ? "active" : ""}
             onClick={() => setStatus(s)}
           >
-            {s === "all" ? "All history" : label(s)}
+            {s === "all" ? (period ? "All statuses" : "All history") : label(s)}
             <span>
               {rows.filter((r) => s === "all" || r.status === s).length}
             </span>
           </button>
         ))}
       </div>
+      {period && (
+        <div className="table-toolbar">
+          <span className="subtle">
+            Activity during {period.label} · {date(period.from)} —{" "}
+            {date(period.to)}. Statuses are current; reversals appear on their
+            accounting date.
+          </span>
+        </div>
+      )}
       <div className="table-toolbar">
         <div className="search-input">
           <Search size={17} />
@@ -595,12 +632,31 @@ export function Transactions({
           disabled={!filtered.length || busy}
           onClick={() =>
             exportRows(
-              "transactions",
-              filtered.map((row) =>
-                Object.fromEntries(
+              period
+                ? `transactions-${period.from}-to-${period.to}`
+                : "transactions",
+              filtered.map((row) => ({
+                ...(period
+                  ? {
+                      Period: period.label,
+                      "Period start": period.from,
+                      "Period end": period.to,
+                      "Activity ID": row.activity_id,
+                      Activity:
+                        row.activity_type === "reversal"
+                          ? "Reversal"
+                          : "Transaction",
+                      "Activity date": date(row.date),
+                      "Original transaction date": date(
+                        row.document_date || row.date,
+                      ),
+                      "Current status": label(row.status),
+                    }
+                  : {}),
+                ...Object.fromEntries(
                   visibleColumns.map((c) => [c.label, c.value(row)]),
                 ),
-              ),
+              })),
             )
           }
         >
@@ -740,7 +796,7 @@ export function Transactions({
             <tbody>
               {filtered.map((row) => (
                 <tr
-                  key={row.id}
+                  key={row.activity_id || row.id}
                   className={
                     selectedSet.has(row.id) ? "transaction-selected" : ""
                   }
@@ -818,7 +874,7 @@ export function Transactions({
                     <button
                       type="button"
                       className="icon-button"
-                      aria-label={`Open transaction #${String(row.id).padStart(5, "0")}`}
+                      aria-label={`Open ${row.activity_type === "reversal" ? "reversal of " : ""}transaction #${String(row.id).padStart(5, "0")}`}
                       disabled={busy}
                       onClick={() => onSelect(row)}
                     >
@@ -842,17 +898,24 @@ export function Transactions({
                 ? "No pending transactions"
                 : status === "posted"
                   ? "No posted transactions"
-                  : "No transactions yet"}
+                  : period
+                    ? "No activity in this period"
+                    : "No transactions yet"}
           </h3>
           <p>
             {query || kind
               ? "Try a different search or transaction type."
-              : "Transactions will appear here as you record business activity."}
+              : period
+                ? "Choose another period to see its transactions and reversals."
+                : "Transactions will appear here as you record business activity."}
           </p>
         </div>
       )}
       <div className="table-bottom">
-        Showing {filtered.length} transaction{filtered.length === 1 ? "" : "s"}{" "}
+        Showing {filtered.length}{" "}
+        {period
+          ? "activity rows"
+          : `transaction${filtered.length === 1 ? "" : "s"}`}{" "}
         · {visibleColumns.length} columns
         {` · Sorted by ${sortColumn.label} ${activeSort.direction === "asc" ? "ascending" : "descending"}`}
         {eligible.length > MAX_SELECTED && canPost

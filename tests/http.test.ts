@@ -3073,6 +3073,760 @@ describe(
       assert.equal(unchanged.balance, "500.00");
     });
 
+    test("shared period access is opt-in, revocable in the same session, and preserves legacy report dates", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Period permission fixture" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const month = "period=month&year=2026&month=11";
+      const admin = await ok("/api/auth/user");
+      assert.ok(admin.permissions.includes("transactions.view_periods"));
+      for (const role of initialAdmin.roles.filter(
+        (r: any) => r.name !== "super_admin",
+      ))
+        assert.ok(
+          !role.permissions.includes("transactions.view_periods"),
+          role.name,
+        );
+      const profile = {
+        username: "http_period_finance",
+        full_name: "Period finance",
+        role_id: roles.find((r) => r.name === "finance").id,
+        active: true,
+        companies: [fixtureCompany.id],
+        data_scope: "company",
+      };
+      const user = await ok("/api/admin/users", {
+        method: "POST",
+        body: { ...profile, password, overrides: {} },
+      });
+      const cookie = await login(profile.username);
+      const setAccess = (
+        enabled: boolean,
+        view = true,
+        extra: Record<string, boolean> = {},
+      ) =>
+        ok("/api/admin/users", {
+          method: "POST",
+          body: {
+            ...profile,
+            id: user.id,
+            overrides: {
+              "transactions.view_periods": enabled,
+              "transactions.view": view,
+              ...extra,
+            },
+          },
+        });
+      for (const endpoint of [
+        "period-activity",
+        "period-balances",
+        "reports",
+        "my-cash",
+      ])
+        assert.equal(
+          (await request(`${prefix}/${endpoint}?${month}`, { cookie })).response
+            .status,
+          403,
+        );
+      await ok(`${prefix}/reports?from=2026-11-01&to=2026-11-30`, { cookie });
+
+      await setAccess(true);
+      assert.ok(
+        (await ok("/api/auth/user", { cookie })).permissions.includes(
+          "transactions.view_periods",
+        ),
+      );
+      assert.deepEqual(
+        await ok(`${prefix}/period-activity?${month}`, { cookie }),
+        [],
+      );
+      const calendar = await ok(
+        `${prefix}/reports?period=calendar_year&year=2026`,
+        { cookie },
+      );
+      assert.equal(calendar.period.from, "2026-01-01");
+      assert.equal(calendar.period.to, "2026-12-31");
+      const financial = await ok(
+        `${prefix}/reports?period=financial_year&year=2026`,
+        { cookie },
+      );
+      assert.equal(financial.period.from, "2026-07-01");
+      assert.equal(financial.period.to, "2027-06-30");
+      const leap = await ok(
+        `${prefix}/reports?period=month&year=2028&month=2`,
+        { cookie },
+      );
+      assert.equal(leap.period.to, "2028-02-29");
+      for (const query of [
+        "period=month&year=2026&month=13",
+        "period=month&year=2026",
+        "period=calendar_year&year=invalid",
+        "period=financial_year&year=9999",
+        "period=custom&from=2026-02-30&to=2026-03-01",
+        "period=custom&from=2026-12-01&to=2026-11-30",
+        "period=unknown&year=2026",
+      ])
+        assert.equal(
+          (await request(`${prefix}/reports?${query}`, { cookie })).response
+            .status,
+          400,
+          query,
+        );
+      assert.equal(
+        (await request(`${prefix}/period-activity`, { cookie })).response
+          .status,
+        400,
+      );
+      assert.equal(
+        (
+          await request(`/api/c/${otherCompany}/period-activity?${month}`, {
+            cookie,
+          })
+        ).response.status,
+        403,
+      );
+      const setup = await ok(`${prefix}/bootstrap`);
+      const purpose = (value: string) =>
+        setup.accounts.find((a: any) => a.purpose === value).id;
+      const master = (table: string, body: any) =>
+        ok(`${prefix}/${table}`, { method: "POST", body });
+      const periodBank = await master("accounts", {
+        code: "LIMITED-PERIOD",
+        name: "Limited period bank",
+        type: "asset",
+        purpose: "bank",
+      });
+      const customer = await master("contacts", {
+        name: "Limited period customer",
+        kind: "customer",
+      });
+      const vendor = await master("contacts", {
+        name: "Limited period vendor",
+        kind: "vendor",
+      });
+      const posted = async (body: any) => {
+        const doc = await master("documents", {
+          description: "Limited period balance fixture",
+          ...body,
+        });
+        await ok(`${prefix}/documents/${doc.id}/post`, {
+          method: "POST",
+          body: {},
+        });
+        return doc;
+      };
+      await posted({
+        kind: "opening",
+        date: "2026-10-31",
+        amount: "1000",
+        targetId: periodBank.id,
+      });
+      const invoice = await posted({
+        kind: "invoice",
+        date: "2026-11-02",
+        amount: "100",
+        contactId: customer.id,
+        headId: purpose("revenue"),
+      });
+      const bill = await posted({
+        kind: "bill",
+        date: "2026-11-03",
+        amount: "80",
+        contactId: vendor.id,
+        headId: purpose("office"),
+      });
+      const limited = {
+        "reports.view": false,
+        "dashboard.view": false,
+        "accounting.manage": false,
+      };
+      await setAccess(true, true, limited);
+      const balances = await ok(`${prefix}/period-balances?${month}`, {
+        cookie,
+      });
+      assert.equal(balances.period.from, "2026-11-01");
+      assert.equal(balances.openingSummary.bank, "1000.00");
+      assert.equal(balances.summary.bank, "1000.00");
+      assert.equal(balances.summary.receivable, "100.00");
+      assert.equal(balances.summary.payable, "80.00");
+      assert.equal(balances.balances.accounts.length, 1);
+      assert.equal(balances.balances.accounts[0].id, periodBank.id);
+      assert.equal(balances.balances.accounts[0].opening, "1000.00");
+      assert.equal(balances.balances.accounts[0].closing, "1000.00");
+      assert.ok(
+        balances.balances.accounts.every((a: any) =>
+          ["bank", "cash"].includes(a.purpose),
+        ),
+      );
+      assert.ok(
+        balances.balances.contacts.every((a: any) =>
+          ["receivable", "payable"].includes(a.purpose),
+        ),
+      );
+      assert.equal(
+        balances.agingReceivables.find((d: any) => d.id === invoice.id)
+          .outstanding,
+        "100.00",
+      );
+      assert.equal(
+        balances.agingPayables.find((d: any) => d.id === bill.id).outstanding,
+        "80.00",
+      );
+      const assertLimitedReport = (value: any) => {
+        for (const field of [
+          "ledger",
+          "openingLedger",
+          "trial",
+          "activity",
+          "balanceSheet",
+          "cashFlow",
+          "byCategory",
+        ])
+          assert.ok(
+            !Object.hasOwn(value, field),
+            `${field} requires report access`,
+          );
+        for (const field of [
+          "revenue",
+          "expenses",
+          "profit",
+          "cashFlow",
+          "intercompany",
+        ])
+          assert.ok(
+            !Object.hasOwn(value.summary, field),
+            `${field} is outside the limited position summary`,
+          );
+      };
+      assertLimitedReport(balances);
+      assert.equal(
+        (await request(`${prefix}/reports?${month}`, { cookie })).response
+          .status,
+        403,
+      );
+      assert.equal(
+        (
+          await request(`${prefix}/reports?from=2026-11-01&to=2026-11-30`, {
+            cookie,
+          })
+        ).response.status,
+        403,
+      );
+      assert.equal(
+        (await request(`${prefix}/period-balances`, { cookie })).response
+          .status,
+        400,
+      );
+      assert.equal(
+        (
+          await request(`/api/c/${otherCompany}/period-balances?${month}`, {
+            cookie,
+          })
+        ).response.status,
+        403,
+      );
+      await setAccess(true, true, { ...limited, "accounting.manage": true });
+      const chartBalances = await ok(`${prefix}/period-balances?${month}`, {
+        cookie,
+      });
+      assert.ok(
+        chartBalances.balances.accounts.some(
+          (a: any) => a.purpose === "revenue",
+        ),
+      );
+      assert.ok(
+        chartBalances.balances.accounts.some(
+          (a: any) => a.purpose === "office",
+        ),
+      );
+      assertLimitedReport(chartBalances);
+      assert.equal(
+        (await request(`${prefix}/reports?${month}`, { cookie })).response
+          .status,
+        403,
+      );
+      await setAccess(true, false);
+      assert.equal(
+        (await request(`${prefix}/period-activity?${month}`, { cookie }))
+          .response.status,
+        403,
+        "Period access alone does not grant transaction access",
+      );
+      assert.equal(
+        (await request(`${prefix}/period-balances?${month}`, { cookie }))
+          .response.status,
+        403,
+      );
+      await setAccess(false);
+      assert.ok(
+        !(await ok("/api/auth/user", { cookie })).permissions.includes(
+          "transactions.view_periods",
+        ),
+      );
+      assert.equal(
+        (await request(`${prefix}/reports?${month}`, { cookie })).response
+          .status,
+        403,
+      );
+      assert.equal(
+        (await request(`${prefix}/period-balances?${month}`, { cookie }))
+          .response.status,
+        403,
+      );
+      await ok(`${prefix}/reports?from=2026-11-01&to=2026-11-30`, { cookie });
+    });
+
+    test("period balances carry forward and activity includes cross-month reversals with historical settlements", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Period accounting fixture" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const setup = await ok(`${prefix}/bootstrap`);
+      const purpose = (value: string) =>
+        setup.accounts.find((a: any) => a.purpose === value).id;
+      const master = (table: string, body: any) =>
+        ok(`${prefix}/${table}`, { method: "POST", body });
+      const bankAccount = await master("accounts", {
+        code: "PERIOD-BANK",
+        name: "Period bank",
+        type: "asset",
+        purpose: "bank",
+      });
+      const customer = await master("contacts", {
+        name: "Period customer",
+        kind: "customer",
+      });
+      const vendor = await master("contacts", {
+        name: "Period vendor",
+        kind: "vendor",
+      });
+      const create = (body: any) =>
+        master("documents", { description: "Period fixture", ...body });
+      const posted = async (body: any) => {
+        const doc = await create(body);
+        await ok(`${prefix}/documents/${doc.id}/post`, {
+          method: "POST",
+          body: {},
+        });
+        return doc;
+      };
+      await posted({
+        kind: "opening",
+        date: "2026-09-30",
+        amount: "50000",
+        targetId: bankAccount.id,
+      });
+      const invoice = await posted({
+        kind: "invoice",
+        date: "2026-09-29",
+        dueDate: "2026-10-10",
+        amount: "1000",
+        contactId: customer.id,
+        headId: purpose("revenue"),
+      });
+      const receipt = await posted({
+        kind: "receipt",
+        date: "2026-10-15",
+        amount: "20000",
+        targetId: bankAccount.id,
+        headId: purpose("revenue"),
+      });
+      const expense = await posted({
+        kind: "expense",
+        date: "2026-10-16",
+        amount: "15000",
+        sourceId: bankAccount.id,
+        headId: purpose("office"),
+      });
+      const partial = await posted({
+        kind: "client_payment",
+        date: "2026-11-05",
+        amount: "400",
+        targetId: bankAccount.id,
+        contactId: customer.id,
+        relatedId: invoice.id,
+      });
+      const bill = await posted({
+        kind: "bill",
+        date: "2026-11-06",
+        amount: "2000",
+        headId: purpose("office"),
+        contactId: vendor.id,
+      });
+      const pending = await create({
+        kind: "expense",
+        date: "2026-11-07",
+        amount: "99",
+        sourceId: bankAccount.id,
+        headId: purpose("office"),
+      });
+      const cancelled = await create({
+        kind: "expense",
+        date: "2026-11-08",
+        amount: "88",
+        sourceId: bankAccount.id,
+        headId: purpose("office"),
+      });
+      await ok(`${prefix}/documents/${cancelled.id}/cancel`, {
+        method: "POST",
+        body: {},
+      });
+      await ok(`${prefix}/documents/${expense.id}/reverse`, {
+        method: "POST",
+        body: { date: "2026-11-10" },
+      });
+      const laterPayment = await posted({
+        kind: "client_payment",
+        date: "2026-12-05",
+        amount: "600",
+        targetId: bankAccount.id,
+        contactId: customer.id,
+        relatedId: invoice.id,
+      });
+      const laterVendorPayment = await posted({
+        kind: "vendor_payment",
+        date: "2026-12-06",
+        amount: "500",
+        sourceId: bankAccount.id,
+        contactId: vendor.id,
+        relatedId: bill.id,
+      });
+      const countBefore = (
+        await control.query(
+          `SELECT count(*) FROM ${schema}.journals WHERE company_id=$1`,
+          [fixtureCompany.id],
+        )
+      ).rows[0].count;
+
+      const october = await ok(
+        `${prefix}/reports?period=month&year=2026&month=10`,
+      );
+      const octoberBank = october.balances.accounts.find(
+        (a: any) => a.id === bankAccount.id,
+      );
+      assert.equal(octoberBank.opening, "50000.00");
+      assert.equal(octoberBank.debit, "20000.00");
+      assert.equal(octoberBank.credit, "15000.00");
+      assert.equal(octoberBank.closing, "55000.00");
+      assert.equal(
+        october.summary.revenue,
+        "20000.00",
+        "Earlier invoice revenue is excluded from October profit",
+      );
+      assert.equal(
+        october.summary.expenses,
+        "15000.00",
+        "November reversal does not change October expense activity",
+      );
+      assert.equal(
+        october.agingReceivables.find((d: any) => d.id === invoice.id)
+          .outstanding,
+        "1000.00",
+      );
+
+      const november = await ok(
+        `${prefix}/reports?period=month&year=2026&month=11`,
+      );
+      const novemberBank = november.balances.accounts.find(
+        (a: any) => a.id === bankAccount.id,
+      );
+      assert.equal(novemberBank.opening, octoberBank.closing);
+      assert.equal(novemberBank.closing, "70400.00");
+      assert.equal(november.summary.revenue, "0.00");
+      assert.equal(november.summary.expenses, "-13000.00");
+      assert.equal(
+        november.agingReceivables.find((d: any) => d.id === invoice.id)
+          .outstanding,
+        "600.00",
+      );
+      assert.equal(
+        november.agingPayables.find((d: any) => d.id === bill.id).outstanding,
+        "2000.00",
+      );
+      const current = await ok(`${prefix}/documents`);
+      assert.equal(
+        Number(current.find((d: any) => d.id === invoice.id).allocated),
+        1000,
+        "Current settlement choices remain independent from historical balances",
+      );
+
+      const octoberRows = await ok(
+        `${prefix}/period-activity?period=month&year=2026&month=10`,
+      );
+      assert.deepEqual(
+        octoberRows.map((d: any) => d.id).sort((a: number, b: number) => a - b),
+        [receipt.id, expense.id].sort((a, b) => a - b),
+      );
+      assert.equal(
+        octoberRows.find((d: any) => d.id === expense.id).status,
+        "reversed",
+        "Document lifecycle remains current even while showing October activity",
+      );
+      const septemberRows = await ok(
+        `${prefix}/period-activity?period=month&year=2026&month=9`,
+      );
+      assert.equal(
+        septemberRows.find((d: any) => d.id === invoice.id).outstanding_as_of,
+        "1000.00",
+      );
+      const novemberRows = await ok(
+        `${prefix}/period-activity?period=month&year=2026&month=11`,
+      );
+      const reversal = novemberRows.find((d: any) => d.id === expense.id);
+      assert.equal(reversal.activity_type, "reversal");
+      assert.match(reversal.activity_id, /^reversal:\d+$/);
+      assert.equal(reversal.date, "2026-11-10");
+      assert.equal(reversal.document_date, "2026-10-16");
+      assert.equal(Number(reversal.amount), -15000);
+      assert.equal(Number(reversal.base_amount), -15000);
+      assert.equal(reversal.can_manage, false);
+      assert.equal(reversal.outstanding_as_of, null);
+      assert.equal(
+        new Set(novemberRows.map((r: any) => r.activity_id)).size,
+        novemberRows.length,
+      );
+      assert.deepEqual(
+        novemberRows
+          .filter((d: any) => d.activity_type === "document")
+          .map((d: any) => d.id)
+          .sort((a: number, b: number) => a - b),
+        [partial.id, bill.id, pending.id, cancelled.id].sort((a, b) => a - b),
+      );
+      assert.ok(
+        !novemberRows.some((d: any) =>
+          [invoice.id, laterPayment.id, laterVendorPayment.id].includes(d.id),
+        ),
+      );
+      const empty = await ok(
+        `${prefix}/reports?period=month&year=2027&month=1`,
+      );
+      const idleBank = empty.balances.accounts.find(
+        (a: any) => a.id === bankAccount.id,
+      );
+      assert.equal(idleBank.opening, "70500.00");
+      assert.equal(idleBank.closing, idleBank.opening);
+      assert.equal(Number(idleBank.debit), 0);
+      assert.equal(Number(idleBank.credit), 0);
+      assert.deepEqual(empty.ledger, []);
+      assert.equal(
+        (
+          await control.query(
+            `SELECT count(*) FROM ${schema}.journals WHERE company_id=$1`,
+            [fixtureCompany.id],
+          )
+        ).rows[0].count,
+        countBefore,
+        "Viewing periods never creates carry-forward journal entries",
+      );
+    });
+
+    test("own-data period grants expose only assigned cash and permitted dated activity", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Period own-data fixture" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const query = "period=month&year=2026&month=11";
+      const setup = await ok(`${prefix}/bootstrap`);
+      const purpose = (value: string) =>
+        setup.accounts.find((a: any) => a.purpose === value).id;
+      const master = (table: string, body: any) =>
+        ok(`${prefix}/${table}`, { method: "POST", body });
+      const custodian = await master("contacts", {
+        name: "Period custodian",
+        kind: "employee",
+      });
+      const colleague = await master("contacts", {
+        name: "Other period custodian",
+        kind: "employee",
+      });
+      const bankAccount = await master("accounts", {
+        code: "P-PRIVATE-BANK",
+        name: "PRIVATE PERIOD BANK",
+        type: "asset",
+        purpose: "bank",
+      });
+      const ownCash = await master("accounts", {
+        code: "P-OWN",
+        name: "My period cash",
+        type: "asset",
+        purpose: "cash",
+        custodian_id: custodian.id,
+      });
+      const otherCash = await master("accounts", {
+        code: "P-OTHER",
+        name: "PRIVATE OTHER CASH",
+        type: "asset",
+        purpose: "cash",
+        custodian_id: colleague.id,
+      });
+      const posted = async (body: any, cookie = adminCookie) => {
+        const doc = await ok(`${prefix}/documents`, {
+          method: "POST",
+          cookie,
+          body: { description: "Period cash movement", ...body },
+        });
+        await ok(`${prefix}/documents/${doc.id}/post`, {
+          method: "POST",
+          cookie,
+          body: {},
+        });
+        return doc;
+      };
+      await posted({
+        kind: "opening",
+        date: "2026-09-01",
+        amount: "100000",
+        targetId: bankAccount.id,
+      });
+      await posted({
+        kind: "withdrawal",
+        date: "2026-10-31",
+        amount: "50000",
+        sourceId: bankAccount.id,
+        targetId: ownCash.id,
+      });
+      const funding = await posted({
+        kind: "withdrawal",
+        date: "2026-11-01",
+        amount: "20000",
+        sourceId: bankAccount.id,
+        targetId: ownCash.id,
+      });
+      const otherFunding = await posted({
+        kind: "withdrawal",
+        date: "2026-11-01",
+        amount: "5000",
+        sourceId: bankAccount.id,
+        targetId: otherCash.id,
+      });
+      const privateExpense = await posted({
+        kind: "expense",
+        date: "2026-11-03",
+        amount: "100",
+        sourceId: ownCash.id,
+        headId: purpose("employee_expense"),
+        description: "PRIVATE PAYROLL PERIOD",
+      });
+      const profile = {
+        username: "http_period_own",
+        full_name: "Period own-data finance",
+        active: true,
+        role_id: roles.find((r) => r.name === "finance").id,
+        companies: [fixtureCompany.id],
+        data_scope: "own",
+        employee_links: [
+          { company_id: fixtureCompany.id, contact_id: custodian.id },
+        ],
+      };
+      const user = await ok("/api/admin/users", {
+        method: "POST",
+        body: {
+          ...profile,
+          password,
+          overrides: { "transactions.view_periods": true },
+        },
+      });
+      const cookie = await login(profile.username);
+      const actor = await ok("/api/auth/user", { cookie });
+      assert.equal(actor.dataScope, "own");
+      assert.ok(actor.permissions.includes("transactions.view_periods"));
+      assert.ok(!actor.permissions.includes("reports.view"));
+      const expense = await posted(
+        {
+          kind: "expense",
+          date: "2026-11-04",
+          amount: "15000",
+          sourceId: ownCash.id,
+          headId: purpose("office"),
+        },
+        cookie,
+      );
+      const future = await posted(
+        {
+          kind: "expense",
+          date: "2026-12-01",
+          amount: "7000",
+          sourceId: ownCash.id,
+          headId: purpose("office"),
+        },
+        cookie,
+      );
+      const cash = await ok(`${prefix}/my-cash?${query}`, { cookie });
+      assert.deepEqual(
+        cash.map((a: any) => a.id),
+        [ownCash.id],
+      );
+      assert.equal(cash[0].opening, "50000.00");
+      assert.equal(cash[0].debit, "20000.00");
+      assert.equal(cash[0].credit, "15100.00");
+      assert.equal(
+        cash[0].closing,
+        "54900.00",
+        "Assigned cash includes all its movements, including private accounting details",
+      );
+      assert.equal(
+        (await ok(`${prefix}/my-cash`, { cookie }))[0].balance,
+        "47900.00",
+      );
+      const activity = await ok(`${prefix}/period-activity?${query}`, {
+        cookie,
+      });
+      assert.deepEqual(
+        activity.map((r: any) => r.id).sort((a: number, b: number) => a - b),
+        [funding.id, expense.id].sort((a, b) => a - b),
+      );
+      assert.ok(
+        !activity.some((r: any) =>
+          [otherFunding.id, privateExpense.id, future.id].includes(r.id),
+        ),
+      );
+      const redactedFunding = activity.find((r: any) => r.id === funding.id);
+      assert.equal(redactedFunding.source_id, null);
+      assert.equal(redactedFunding.created_by, null);
+      assert.equal(redactedFunding.creator, "Finance");
+      assert.equal(redactedFunding.can_manage, false);
+      assert.deepEqual(redactedFunding.extra, {});
+      assert.ok(!JSON.stringify(activity).includes("PRIVATE"));
+      for (const path of [
+        `${prefix}/reports?${query}`,
+        `${prefix}/period-balances?${query}`,
+        `/api/c/${otherCompany}/period-activity?${query}`,
+        `/api/c/${otherCompany}/my-cash?${query}`,
+        `${prefix}/documents/${privateExpense.id}/ledger`,
+      ])
+        assert.equal(
+          (await request(path, { cookie })).response.status,
+          403,
+          path,
+        );
+      await ok("/api/admin/users", {
+        method: "POST",
+        body: {
+          ...profile,
+          id: user.id,
+          overrides: { "transactions.view_periods": false },
+        },
+      });
+      assert.equal(
+        (await request(`${prefix}/period-activity?${query}`, { cookie }))
+          .response.status,
+        403,
+      );
+      assert.equal(
+        (await request(`${prefix}/my-cash?${query}`, { cookie })).response
+          .status,
+        403,
+      );
+      assert.equal(
+        (await ok(`${prefix}/my-cash`, { cookie }))[0].balance,
+        "47900.00",
+      );
+    });
+
     test("removed module history remains visible without allowing new postings", async () => {
       const bootstrap = await ok(`/api/c/${company}/bootstrap`);
       const fixed = bootstrap.accounts.find(

@@ -25,6 +25,7 @@ import {
 } from "./accounting";
 import { reports } from "./reports";
 import { permissionKeys } from "../shared/permissions";
+import { periodFromQuery, type ResolvedPeriod } from "../shared/period";
 import Decimal from "decimal.js";
 import { documentSchema } from "../shared/domain";
 import { administrator } from "./config";
@@ -55,6 +56,14 @@ const day = z
     "Invalid date",
   );
 const name = z.string().trim().min(1).max(150);
+function requestedPeriod(req: Request): ResolvedPeriod | null {
+  if (
+    req.query.period !== undefined &&
+    !req.actor.permissions.includes("transactions.view_periods")
+  )
+    fail("Period viewing permission is required", 403);
+  return periodFromQuery(req.query);
+}
 const retiredDocumentSql = `(
   d.kind IN ('advance','advance_expense','advance_return','asset_purchase','depreciation')
   OR (d.kind='bill' AND (
@@ -232,7 +241,9 @@ export function registerRoutes(app: Express) {
   app.use("/api/c/:company", (req, res, next) => {
     if (
       req.actor.dataScope === "own" &&
-      !/^\/(bootstrap|my-cash|documents(?:\/.*)?)$/.test(req.path)
+      !/^\/(bootstrap|my-cash|period-activity|documents(?:\/.*)?)$/.test(
+        req.path,
+      )
     )
       return void res.status(403).json({
         message: "Company-wide data is not available with own-data access",
@@ -251,7 +262,14 @@ export function registerRoutes(app: Express) {
     "/api/c/:company/my-cash",
     requirePermission("transactions.view"),
     route(async (req, res) => {
-      res.json(await ownCashBalances(pool, req.actor, id(req.params.company)));
+      res.json(
+        await ownCashBalances(
+          pool,
+          req.actor,
+          id(req.params.company),
+          requestedPeriod(req),
+        ),
+      );
     }),
   );
   app.get(
@@ -477,6 +495,73 @@ export function registerRoutes(app: Express) {
           )
         ).rows,
       );
+    }),
+  );
+  app.get(
+    "/api/c/:company/period-activity",
+    requirePermission("transactions.view"),
+    requirePermission("transactions.view_periods"),
+    route(async (req, res) => {
+      const period = requestedPeriod(req);
+      if (!period) fail("Choose a period");
+      const company = id(req.params.company),
+        own = req.actor.dataScope === "own";
+      const scope = own
+        ? ownDocumentWhere
+        : `(d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND $2::integer IS NOT NULL`;
+      const rows = (
+        await pool.query(
+          `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,
+          ct.name contact_name,p.name project_name,u.full_name creator,
+          CASE WHEN d.company_id=$1 THEN (SELECT count(*)::integer FROM attachments a WHERE a.document_id=d.id) ELSE 0 END attachment_count,
+          d.date document_date,activity.date date,activity.activity_id,activity.activity_type,activity.journal_id,
+          CASE WHEN activity.activity_type='reversal' THEN -COALESCE(NULLIF((
+            SELECT sum(abs(l.foreign_amount)) FROM journal_lines l WHERE l.journal_id=activity.journal_id AND l.account_id=
+              CASE WHEN d.company_id<>$1 THEN d.target_id ELSE COALESCE(d.source_id,d.target_id,d.head_id,(SELECT account_id FROM categories WHERE id=d.category_id)) END
+          ),0),d.amount) ELSE d.amount END amount,
+          CASE WHEN activity.activity_type='reversal' THEN -(SELECT sum(l.debit) FROM journal_lines l WHERE l.journal_id=activity.journal_id) ELSE d.base_amount END base_amount,
+          COALESCE((SELECT sum(a.amount) FROM allocations a WHERE a.related_id=d.id
+            AND EXISTS(SELECT 1 FROM journals j WHERE j.document_id=a.document_id AND j.reversal_of IS NULL AND j.date<=$4::date)
+            AND NOT EXISTS(SELECT 1 FROM journals j WHERE j.document_id=a.document_id AND j.reversal_of IS NOT NULL AND j.date<=$4::date)),0) allocated,
+          COALESCE((SELECT sum(a.base_amount) FROM allocations a WHERE a.related_id=d.id
+            AND EXISTS(SELECT 1 FROM journals j WHERE j.document_id=a.document_id AND j.reversal_of IS NULL AND j.date<=$4::date)
+            AND NOT EXISTS(SELECT 1 FROM journals j WHERE j.document_id=a.document_id AND j.reversal_of IS NOT NULL AND j.date<=$4::date)),0) allocated_base,
+          (EXISTS(SELECT 1 FROM journals j WHERE j.document_id=d.id AND j.company_id=$1 AND j.reversal_of IS NULL AND j.date<=$4::date)
+           AND NOT EXISTS(SELECT 1 FROM journals j WHERE j.document_id=d.id AND j.company_id=$1 AND j.reversal_of IS NOT NULL AND j.date<=$4::date)) posted_as_of
+        FROM documents d JOIN users u ON u.id=d.created_by
+        LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id
+        JOIN LATERAL (
+          SELECT d.date,'document:'||d.id activity_id,'document' activity_type,NULL::integer journal_id WHERE d.date BETWEEN $3::date AND $4::date
+          UNION ALL
+          SELECT j.date,'reversal:'||j.id,'reversal',j.id FROM journals j WHERE j.document_id=d.id AND j.company_id=$1 AND j.reversal_of IS NOT NULL AND j.date BETWEEN $3::date AND $4::date
+        ) activity ON true
+        WHERE ${scope} ORDER BY activity.date DESC,d.id DESC,activity.activity_type`,
+          [company, req.actor.id, period!.from, period!.to],
+        )
+      ).rows.map((row) => ({
+        ...row,
+        outstanding_as_of:
+          row.activity_type === "document" &&
+          row.posted_as_of &&
+          !row.inbound &&
+          (["invoice", "bill"].includes(row.kind) ||
+            (row.kind === "asset_purchase" && !row.source_id))
+            ? Decimal.max(
+                0,
+                new Decimal(row.amount).minus(row.allocated),
+              ).toFixed(2)
+            : null,
+        ...(row.activity_type === "reversal" ? { can_manage: false } : {}),
+      }));
+      if (own) {
+        const context = await ownContext(pool, req.actor, company);
+        res.json(
+          rows.map((row) => ({
+            ...redactOwnDocument(row, req.actor, context),
+            ...(row.activity_type === "reversal" ? { can_manage: false } : {}),
+          })),
+        );
+      } else res.json(rows);
     }),
   );
   app.post(
@@ -844,6 +929,44 @@ export function registerRoutes(app: Express) {
     }),
   );
   app.get(
+    "/api/c/:company/period-balances",
+    requirePermission("transactions.view"),
+    requirePermission("transactions.view_periods"),
+    route(async (req, res) => {
+      // The company-scope middleware deliberately keeps this out of own-data
+      // access; assigned cash has its separate scoped /my-cash endpoint.
+      const period = requestedPeriod(req);
+      if (!period) fail("Choose a period");
+      const result = await reports(
+        pool,
+        id(req.params.company),
+        period!.from,
+        period!.to,
+      );
+      const position = (summary: typeof result.openingSummary) => ({
+        bank: summary.bank,
+        cash: summary.cash,
+        receivable: summary.receivable,
+        payable: summary.payable,
+      });
+      res.json({
+        period,
+        summary: position(result.summary),
+        openingSummary: position(result.openingSummary),
+        balances: {
+          accounts: result.balances.accounts.filter(
+            (account) =>
+              req.actor.permissions.includes("accounting.manage") ||
+              ["bank", "cash"].includes(account.purpose),
+          ),
+          contacts: result.balances.contacts,
+        },
+        agingReceivables: result.agingReceivables,
+        agingPayables: result.agingPayables,
+      });
+    }),
+  );
+  app.get(
     "/api/c/:company/reports",
     route(async (req, res) => {
       if (
@@ -852,10 +975,15 @@ export function registerRoutes(app: Express) {
         )
       )
         return res.status(403).json({ message: "Permission denied" });
+      const period = requestedPeriod(req);
       const from = day.parse(
-          req.query.from || new Date().toISOString().slice(0, 7) + "-01",
+          period?.from ||
+            req.query.from ||
+            new Date().toISOString().slice(0, 7) + "-01",
         ),
-        to = day.parse(req.query.to || new Date().toISOString().slice(0, 10));
+        to = day.parse(
+          period?.to || req.query.to || new Date().toISOString().slice(0, 10),
+        );
       if (from > to) fail("Start date must precede end date");
       if (req.query.project !== undefined)
         fail("Project reporting is no longer available", 410);
@@ -871,13 +999,37 @@ export function registerRoutes(app: Express) {
         byEmployee,
         outstandingAdvances,
         summary,
+        period: _resolved,
+        balances,
+        openingSummary,
+        openingLedger,
         ...financialReports
       } = result;
       const { advances, ...financialSummary } = summary;
       res.json(
         req.actor.permissions.includes("reports.view")
-          ? { ...financialReports, summary: financialSummary }
-          : { summary: financialSummary, cashPosition: result.cashPosition },
+          ? {
+              ...financialReports,
+              summary: financialSummary,
+              ...(period
+                ? { period, balances, openingSummary, openingLedger }
+                : {}),
+            }
+          : {
+              summary: financialSummary,
+              cashPosition: result.cashPosition,
+              ...(period
+                ? {
+                    period,
+                    openingSummary,
+                    balances: {
+                      accounts: balances.accounts.filter((a) =>
+                        ["bank", "cash"].includes(a.purpose),
+                      ),
+                    },
+                  }
+                : {}),
+            },
       );
     }),
   );
