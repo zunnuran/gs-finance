@@ -647,6 +647,88 @@ describe(
       );
     });
 
+    test("super admin can find an unused child expense account after saving and reloading, and explicitly map its category", async () => {
+      const admin = initialAdmin.users.find(
+        (user: any) => user.username === "admin",
+      );
+      assert.equal(
+        roles.find((role: any) => role.id === admin.role_id)?.name,
+        "super_admin",
+      );
+      const prefix = `/api/c/${company}`;
+      const before = await ok(`${prefix}/bootstrap`);
+      const parent = before.accounts.find(
+        (account: any) =>
+          account.type === "expense" && account.purpose === "office",
+      );
+      assert.ok(
+        parent,
+        "The new account belongs under an existing office expense account",
+      );
+      const input = {
+        code: "IMP-GROCERY",
+        name: "Grocery & kitchen",
+        type: "expense",
+        active: true,
+        purpose: "general",
+        currency: "PKR",
+        parent_id: parent.id,
+        restricted: false,
+        custodian_id: null,
+      };
+      const account = await ok(`${prefix}/accounts`, {
+        method: "POST",
+        body: input,
+      });
+      assert.deepEqual(account, {
+        ...input,
+        id: account.id,
+        company_id: company,
+      });
+      for (const stage of ["immediately after saving", "after reloading"]) {
+        const bootstrap = await ok(`${prefix}/bootstrap`);
+        assert.deepEqual(
+          bootstrap.accounts.find((row: any) => row.id === account.id),
+          account,
+          `The chart includes the child expense account ${stage}`,
+        );
+        assert.ok(
+          !bootstrap.categories.some(
+            (row: any) => row.account_id === account.id,
+          ),
+          "Creating an account does not implicitly create an expense category",
+        );
+        assert.ok(
+          bootstrap.accounts.every((row: any) => row.company_id === company),
+        );
+      }
+      assert.equal(
+        Number(
+          (
+            await control.query(
+              `SELECT count(*) FROM ${schema}.journal_lines WHERE account_id=$1`,
+              [account.id],
+            )
+          ).rows[0].count,
+        ),
+        0,
+        "An account is visible without posting any journal entries",
+      );
+      const category = await ok(`${prefix}/categories`, {
+        method: "POST",
+        body: { name: account.name, account_id: account.id },
+      });
+      const mapped = await ok(`${prefix}/bootstrap`);
+      assert.deepEqual(
+        mapped.categories.find((row: any) => row.id === category.id),
+        category,
+      );
+      assert.equal(category.account_id, account.id);
+      const other = await ok(`/api/c/${otherCompany}/bootstrap`);
+      assert.ok(!other.accounts.some((row: any) => row.id === account.id));
+      assert.ok(!other.categories.some((row: any) => row.id === category.id));
+    });
+
     test("company data access permits employee visibility while other users' submissions remain protected from editing", async () => {
       const own = await ok(`/api/c/${company}/documents`, {
         cookie: employeeCookie,

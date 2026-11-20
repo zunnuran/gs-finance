@@ -401,6 +401,7 @@ export default function App() {
     [to, setTo] = useState(today()),
     [modal, setModal] = useState<Row | null>(null),
     [selected, setSelected] = useState<Row | null>(null),
+    [masterRevision, setMasterRevision] = useState(0),
     [refresh, setRefresh] = useState(0);
   const can = (p: string) => !!user?.permissions.includes(p);
   const ownData = user?.dataScope === "own";
@@ -483,23 +484,37 @@ export default function App() {
     let active = true;
     setLoading(true);
     setError("");
-    Promise.all([
-      api(base + "/bootstrap"),
-      can("transactions.view") ? api(base + "/documents") : Promise.resolve([]),
-      ownData && can("transactions.view")
+    setData((current) =>
+      current.company.id === company ? current : emptyData,
+    );
+    setDocuments([]);
+    setReport(null);
+    Promise.allSettled([
+      api(base + "/bootstrap").then((master) => {
+        if (active) setData(master);
+      }),
+      (can("transactions.view")
+        ? api(base + "/documents")
+        : Promise.resolve([])
+      ).then((docs) => {
+        if (active) setDocuments(docs);
+      }),
+      (ownData && can("transactions.view")
         ? api(base + "/my-cash").then((cash) => ({
             trial: cash,
             cashPosition: cash,
           }))
         : can("reports.view") || can("dashboard.view")
           ? api(`${base}/reports?from=${from}&to=${to}`)
-          : Promise.resolve(null),
+          : Promise.resolve(null)
+      ).then((rep) => {
+        if (active) setReport(rep);
+      }),
     ])
-      .then(([master, docs, rep]) => {
+      .then((results) => {
         if (active) {
-          setData(master);
-          setDocuments(docs);
-          setReport(rep);
+          const failed = results.find((result) => result.status === "rejected");
+          if (failed?.status === "rejected") setError(failed.reason.message);
         }
       })
       .catch((e) => {
@@ -890,6 +905,7 @@ export default function App() {
               )}
               {["accounts", "chart", "categories"].includes(page) && (
                 <MasterPage
+                  key={`${company}-${page}-${masterRevision}`}
                   page={page}
                   ownData={ownData}
                   data={data}
@@ -984,14 +1000,41 @@ export default function App() {
           data={data}
           onClose={closeModal}
           onSave={async (d) => {
-            await api(
+            const saved = await api(
               `${base}/${modal.table}${modal.row?.id ? "/" + modal.row.id : ""}`,
               modal.row?.id ? "PATCH" : "POST",
               d,
             );
+            setData((current) => {
+              if (current.company.id !== company) return current;
+              const table = modal.table as
+                "accounts" | "contacts" | "categories";
+              const rows = current[table];
+              return {
+                ...current,
+                [table]: rows.some((row) => row.id === saved.id)
+                  ? rows.map((row) => (row.id === saved.id ? saved : row))
+                  : [...rows, saved],
+              };
+            });
+            setMasterRevision((revision) => revision + 1);
+            if (
+              modal.table === "accounts" &&
+              page === "accounts" &&
+              !["bank", "cash"].includes(saved.purpose) &&
+              can("accounting.manage")
+            ) {
+              changePage("chart");
+            } else if (modal.table === "categories") {
+              changePage("categories");
+            }
             closeModal();
             reload();
-            notify("Record saved");
+            notify(
+              modal.table === "accounts"
+                ? `${saved.name} saved${can("accounting.manage") ? " in Chart of accounts" : ""} (ID ${saved.id})`
+                : "Record saved",
+            );
           }}
         />
       )}
@@ -1724,15 +1767,17 @@ function MasterPage({
   const [sort, setSort] = useState<SortState | null>(null);
   useEffect(() => setSort(null), [page, data.company.id]);
   const all = (data[table as keyof Data] as Row[]) || [];
-  const filteredRows = all
+  const visibleRows = all.filter(
+    (r) => page !== "accounts" || ["bank", "cash"].includes(r.purpose),
+  );
+  const filteredRows = visibleRows
     .filter(
       (r) =>
-        (page !== "accounts" || ["bank", "cash"].includes(r.purpose)) &&
-        (!query ||
-          [r.name, r.code]
-            .join(" ")
-            .toLowerCase()
-            .includes(query.toLowerCase())),
+        !query ||
+        [r.name, r.code, String(r.id)]
+          .join(" ")
+          .toLowerCase()
+          .includes(query.toLowerCase()),
     )
     .sort((a, b) => (table === "categories" ? a.position - b.position : 0));
   const balance = (row: Row) =>
@@ -1783,8 +1828,15 @@ function MasterPage({
                 : title(page)}
           </h2>
           <p>
-            {rows.length} records · {rows.filter((r) => r.active).length} active
+            {query ? `${rows.length} of ${visibleRows.length}` : rows.length}{" "}
+            records · {rows.filter((r) => r.active).length} active
           </p>
+          {page === "chart" && (
+            <p>
+              Expense accounts can be used directly in transactions. Add a
+              linked category to include one in the expense category dropdown.
+            </p>
+          )}
         </div>
         {can("masters.manage") && (
           <div className="card-actions">
@@ -1821,9 +1873,24 @@ function MasterPage({
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={`Search ${page === "chart" ? "accounts" : page}…`}
+            placeholder={
+              table === "accounts"
+                ? "Search by name, code or ID…"
+                : `Search ${page}…`
+            }
+            aria-label={
+              table === "accounts" ? "Search accounts" : "Search categories"
+            }
           />
         </div>
+        {query && (
+          <button
+            className="button secondary compact"
+            onClick={() => setQuery("")}
+          >
+            Clear search
+          </button>
+        )}
         <button
           className="button secondary compact"
           disabled={!rows.length}
@@ -1864,6 +1931,7 @@ function MasterPage({
                   <td>
                     <strong>{r.name}</strong>
                     <small>
+                      {table === "accounts" ? `ID ${r.id} · ` : ""}
                       {r.code}
                       {r.custodian_id
                         ? " · Custodian: " +
@@ -1899,14 +1967,37 @@ function MasterPage({
                     <Badge status={r.active ? "active" : "disabled"} />
                   </td>
                   <td>
-                    {can("masters.manage") && (
-                      <button
-                        className="text-button"
-                        onClick={() => onEdit(table, r)}
-                      >
-                        Edit
-                      </button>
-                    )}
+                    <div className="card-actions">
+                      {page === "chart" &&
+                        can("masters.manage") &&
+                        r.active &&
+                        r.type === "expense" &&
+                        r.purpose !== "depreciation" &&
+                        !data.categories.some(
+                          (category) =>
+                            category.account_id === r.id && category.active,
+                        ) && (
+                          <button
+                            className="text-button"
+                            onClick={() =>
+                              onEdit("categories", {
+                                name: r.name,
+                                account_id: r.id,
+                              })
+                            }
+                          >
+                            Add category
+                          </button>
+                        )}
+                      {can("masters.manage") && (
+                        <button
+                          className="text-button"
+                          onClick={() => onEdit(table, r)}
+                        >
+                          Edit
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -1915,11 +2006,17 @@ function MasterPage({
         </div>
       ) : (
         <Empty
-          title={`No ${page === "chart" ? "accounts" : page} yet`}
+          title={
+            query
+              ? "No matching records"
+              : `No ${page === "chart" ? "accounts" : page} yet`
+          }
           text={
-            ownData
-              ? "Ask your finance administrator to link your cash custodian record and assign a cash account."
-              : "Add a record to start organizing your company finances."
+            query
+              ? "Clear the search to see all records in this list."
+              : ownData
+                ? "Ask your finance administrator to link your cash custodian record and assign a cash account."
+                : "Add a record to start organizing your company finances."
           }
         />
       )}
@@ -2861,7 +2958,10 @@ function TransactionModal({
           </Field>
         )}
         {category && (
-          <Field label="Expense category">
+          <Field
+            label="Expense category"
+            hint="Accounts and categories are separate. Leave this blank to choose an expense account directly, or add a linked category in Categories."
+          >
             <Select
               value={form.categoryId}
               onChange={(v) => {
