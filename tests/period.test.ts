@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   defaultPeriod,
+  currentMonthPeriod,
   periodFromQuery,
   periodQuery,
   resolvePeriod,
@@ -43,13 +44,32 @@ test("annual periods cover calendar and July–June boundaries inclusively", () 
     "2027-01-01",
   );
 });
-test("default month uses Pakistan time even across a UTC year boundary", () => {
-  assert.deepEqual(defaultPeriod(new Date("2026-12-31T20:00:00Z")), {
+test("the default is unfiltered and all-data requests carry no stale date parameters", () => {
+  assert.deepEqual(defaultPeriod(), { mode: "all" });
+  assert.equal(
+    periodQuery({
+      mode: "all",
+      year: 2026,
+      month: 11,
+      from: "2026-11-01",
+      to: "2026-11-30",
+    }),
+    "period=all",
+  );
+  assert.deepEqual(periodFromQuery({ period: "all" }), {
+    mode: "all",
+    from: "0001-01-01",
+    to: "9999-12-31",
+    label: "All data",
+  });
+});
+test("the month picker uses Pakistan time even across a UTC year boundary", () => {
+  assert.deepEqual(currentMonthPeriod(new Date("2026-12-31T20:00:00Z")), {
     mode: "month",
     year: 2027,
     month: 1,
   });
-  assert.deepEqual(defaultPeriod(new Date("2026-06-30T20:00:00Z")), {
+  assert.deepEqual(currentMonthPeriod(new Date("2026-06-30T20:00:00Z")), {
     mode: "month",
     year: 2026,
     month: 7,

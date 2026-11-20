@@ -3,6 +3,7 @@ import { CalendarDays } from "lucide-react";
 import { SearchableSelect } from "./SearchableSelect";
 import {
   defaultPeriod,
+  currentMonthPeriod,
   resolvePeriod,
   type PeriodSelection,
 } from "../../shared/period";
@@ -12,7 +13,9 @@ export function useFinancialPeriod(
   company: number,
   enabled: boolean,
 ) {
-  const key = `gss-finance-period-v1-${userId}-${company}`;
+  // Older preferences selected a month automatically. Start the optional
+  // filter fresh, then remember only choices made with the new selector.
+  const key = `gss-finance-period-v2-${userId}-${company}`;
   const saved = useMemo(() => {
     try {
       const value = JSON.parse(localStorage.getItem(key) || "null");
@@ -21,7 +24,7 @@ export function useFinancialPeriod(
         return value as PeriodSelection;
       }
     } catch {
-      /* Invalid or unavailable preferences use the current PKT month. */
+      /* Invalid or unavailable preferences show all data. */
     }
     return defaultPeriod();
   }, [key]);
@@ -85,17 +88,22 @@ export function PeriodSelector({
           aria-label="Period type"
           value={draft.mode}
           onChange={(mode) => {
-            const year = Number(selected.from.slice(0, 4));
-            const month = Number(selected.from.slice(5, 7));
+            const seed =
+              selected.mode === "all"
+                ? resolvePeriod(currentMonthPeriod())
+                : selected;
+            const year = Number(seed.from.slice(0, 4));
+            const month = Number(seed.from.slice(5, 7));
             setDraft({
               mode: mode as PeriodSelection["mode"],
               year: mode === "financial_year" && month < 7 ? year - 1 : year,
               month,
-              from: selected.from,
-              to: selected.to,
+              from: seed.from,
+              to: seed.to,
             });
           }}
           options={[
+            { value: "all", label: "All data" },
             { value: "month", label: "Month" },
             { value: "calendar_year", label: "Calendar year" },
             { value: "financial_year", label: "Financial year (Jul–Jun)" },
@@ -110,7 +118,7 @@ export function PeriodSelector({
             options={months}
           />
         )}
-        {draft.mode !== "custom" ? (
+        {draft.mode === "all" ? null : draft.mode !== "custom" ? (
           <label className="period-year">
             {draft.mode === "financial_year" ? "Starting year" : "Year"}
             <input
@@ -158,15 +166,32 @@ export function PeriodSelector({
           </>
         )}
         <button type="submit" className="button compact">
-          Apply period
+          {draft.mode === "all" ? "Show all data" : "Apply period"}
         </button>
+        {selected.mode !== "all" && (
+          <button
+            type="button"
+            className="button secondary compact"
+            onClick={() => onChange({ mode: "all" })}
+          >
+            All data
+          </button>
+        )}
       </form>
       <div className="period-caption">
         <strong>{selected.label}</strong>
-        <span>
-          {selected.from} — {selected.to}
-        </span>
-        <span>Activity during this period · Balances as of {selected.to}</span>
+        {selected.mode === "all" ? (
+          <span>No date filter · All recorded activity and balances</span>
+        ) : (
+          <>
+            <span>
+              {selected.from} — {selected.to}
+            </span>
+            <span>
+              Activity during this period · Balances as of {selected.to}
+            </span>
+          </>
+        )}
       </div>
       {error && (
         <p className="error" role="alert">

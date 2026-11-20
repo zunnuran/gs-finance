@@ -1,5 +1,5 @@
 export type PeriodMode =
-  "month" | "calendar_year" | "financial_year" | "custom";
+  "all" | "month" | "calendar_year" | "financial_year" | "custom";
 export type PeriodSelection = {
   mode: PeriodMode;
   year?: number;
@@ -36,7 +36,10 @@ export function pakistanToday(now = new Date()) {
     day: "2-digit",
   }).format(now);
 }
-export function defaultPeriod(now = new Date()): PeriodSelection {
+export function defaultPeriod(): PeriodSelection {
+  return { mode: "all" };
+}
+export function currentMonthPeriod(now = new Date()): PeriodSelection {
   const [year, month] = pakistanToday(now).split("-").map(Number);
   return { mode: "month", year, month };
 }
@@ -55,6 +58,13 @@ export function resolvePeriod(selection: PeriodSelection): ResolvedPeriod {
   if (!selection || typeof selection !== "object")
     return invalid("Choose a period");
   const { mode } = selection;
+  if (mode === "all")
+    return {
+      mode,
+      from: "0001-01-01",
+      to: "9999-12-31",
+      label: "All data",
+    };
   if (mode === "custom") {
     const from = validDay(selection.from),
       to = validDay(selection.to);
@@ -118,7 +128,7 @@ export function periodQuery(selection: PeriodSelection) {
   if (selection.mode === "custom") {
     params.set("from", selection.from!);
     params.set("to", selection.to!);
-  } else {
+  } else if (selection.mode !== "all") {
     params.set("year", String(selection.year));
     if (selection.mode === "month")
       params.set("month", String(selection.month));

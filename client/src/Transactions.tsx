@@ -116,6 +116,7 @@ export function Transactions({
   kindLabels,
   ConfirmationModal,
   period,
+  allData = false,
 }: {
   rows: Row[];
   query: string;
@@ -133,6 +134,7 @@ export function Transactions({
   exportRows: (name: string, rows: Row[]) => void;
   kindLabels: Record<string, string>;
   period?: { from: string; to: string; label: string };
+  allData?: boolean;
   ConfirmationModal: ComponentType<{
     title: string;
     description?: string;
@@ -141,7 +143,8 @@ export function Transactions({
     busy?: boolean;
   }>;
 }) {
-  const [status, setStatus] = useState(period ? "all" : "pending");
+  const [status, setStatus] = useState("all");
+  const activityView = !!period || allData;
   const [kind, setKind] = useState("");
   const [columnQuery, setColumnQuery] = useState("");
   const [sort, setSort] = useState<SortState>({
@@ -190,12 +193,12 @@ export function Transactions({
     },
     {
       id: "date",
-      label: period ? "Activity date" : "Date",
+      label: activityView ? "Activity date" : "Date",
       value: (r) => date(r.date),
       sortValue: (r) => r.date,
       sortType: "date",
     },
-    ...(period
+    ...(activityView
       ? ([
           {
             id: "activity",
@@ -220,7 +223,7 @@ export function Transactions({
     },
     {
       id: "status",
-      label: period ? "Current status" : "Status",
+      label: activityView ? "Current status" : "Status",
       value: (r) => label(r.status),
     },
     {
@@ -334,7 +337,7 @@ export function Transactions({
           .filter((c) => stored.includes(c.id))
           .map((c) => c.id);
         if (valid.length)
-          return period
+          return activityView
             ? [...new Set([...valid, "activity", "document_date"])]
             : valid;
       }
@@ -506,7 +509,11 @@ export function Transactions({
             className={status === s ? "active" : ""}
             onClick={() => setStatus(s)}
           >
-            {s === "all" ? (period ? "All statuses" : "All history") : label(s)}
+            {s === "all"
+              ? activityView
+                ? "All statuses"
+                : "All history"
+              : label(s)}
             <span>
               {rows.filter((r) => s === "all" || r.status === s).length}
             </span>
@@ -519,6 +526,14 @@ export function Transactions({
             Activity during {period.label} · {date(period.from)} —{" "}
             {date(period.to)}. Statuses are current; reversals appear on their
             accounting date.
+          </span>
+        </div>
+      )}
+      {allData && (
+        <div className="table-toolbar">
+          <span className="subtle">
+            All recorded activity · No date filter. Statuses are current;
+            reversals appear on their accounting date.
           </span>
         </div>
       )}
@@ -634,13 +649,15 @@ export function Transactions({
             exportRows(
               period
                 ? `transactions-${period.from}-to-${period.to}`
-                : "transactions",
+                : allData
+                  ? "transactions-all-data"
+                  : "transactions",
               filtered.map((row) => ({
-                ...(period
+                ...(activityView
                   ? {
-                      Period: period.label,
-                      "Period start": period.from,
-                      "Period end": period.to,
+                      Period: period?.label || "All data",
+                      "Period start": period?.from || "",
+                      "Period end": period?.to || "",
                       "Activity ID": row.activity_id,
                       Activity:
                         row.activity_type === "reversal"
@@ -913,7 +930,7 @@ export function Transactions({
       )}
       <div className="table-bottom">
         Showing {filtered.length}{" "}
-        {period
+        {activityView
           ? "activity rows"
           : `transaction${filtered.length === 1 ? "" : "s"}`}{" "}
         · {visibleColumns.length} columns

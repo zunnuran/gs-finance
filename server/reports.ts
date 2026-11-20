@@ -10,6 +10,7 @@ export async function reports(
   from: string,
   to: string,
   project: number | null = null,
+  agingAsOf: string = to,
 ) {
   const rows = (
     await c.query(
@@ -214,7 +215,8 @@ export async function reports(
         days = Math.max(
           0,
           Math.floor(
-            (Date.parse(to) - Date.parse(d.due_date || d.date)) / 86400000,
+            (Date.parse(agingAsOf) - Date.parse(d.due_date || d.date)) /
+              86400000,
           ),
         );
       return {
@@ -239,6 +241,7 @@ export async function reports(
     .filter((d) => new Decimal(d.outstanding).gt(0));
   return {
     period: { mode: "custom", from, to, label: "Custom dates" },
+    agingAsOf,
     openingSummary: {
       bank: openingTotal(["bank"]).toFixed(2),
       cash: openingTotal(["cash"]).toFixed(2),

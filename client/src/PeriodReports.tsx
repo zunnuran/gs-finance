@@ -6,6 +6,7 @@ import { SortHeader } from "./SortHeader";
 import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
 import { formatLedgerAmount } from "./TransactionLedger";
 import { periodStatementRows } from "./periodStatements";
+import { pakistanToday } from "../../shared/period";
 
 type Row = Record<string, any>;
 type Data = { company: Row; accounts: Row[]; contacts: Row[] };
@@ -80,7 +81,8 @@ export function PeriodReports({
       </div>
     );
 
-  const periodMode = !!report.period;
+  const allData = report.period?.mode === "all";
+  const periodMode = !!report.period && !allData;
   const periodFrom = report.period?.from || from;
   const periodTo = report.period?.to || to;
   const periodName =
@@ -88,8 +90,18 @@ export function PeriodReports({
     periodLabel ||
     `${dateLabel(periodFrom)} — ${dateLabel(periodTo)}`;
   const reportName = types.find(([key]) => key === type)?.[1] || type;
-  const statement = periodMode && ["ledger", "bank", "contact"].includes(type);
+  const statement =
+    (periodMode || allData) && ["ledger", "bank", "contact"].includes(type);
   const balanceReport = ["balance", "receivables", "payables"].includes(type);
+  const allDataBalanceReport = [
+    "balance",
+    "receivables",
+    "payables",
+    "trial",
+    "employee_cash",
+    "cash",
+    "intercompany",
+  ].includes(type);
   let rows: Row[] = [];
   let columns: Column[] = [
     ["name", "Account"],
@@ -132,10 +144,10 @@ export function PeriodReports({
     columns = [
       ["name", "Account"],
       ["type", "Type"],
-      ["balance", "Closing balance", "money"],
+      ["balance", allData ? "Balance" : "Closing balance", "money"],
     ];
   } else if (
-    periodMode &&
+    (periodMode || allData) &&
     ["trial", "employee_cash", "cash", "intercompany"].includes(type)
   ) {
     rows =
@@ -156,18 +168,28 @@ export function PeriodReports({
             ? "Counterparty company"
             : "Account",
       ],
-      ["opening", "B/F (PKR)", "money"],
-      ["debit", "Period debit (PKR)", "money"],
-      ["credit", "Period credit (PKR)", "money"],
-      ["closing", "C/F (PKR)", "money"],
+      ...(periodMode ? [["opening", "B/F (PKR)", "money"] as Column] : []),
+      ["debit", allData ? "Total debit (PKR)" : "Period debit (PKR)", "money"],
+      [
+        "credit",
+        allData ? "Total credit (PKR)" : "Period credit (PKR)",
+        "money",
+      ],
+      ["closing", allData ? "Balance (PKR)" : "C/F (PKR)", "money"],
     ];
     if (rows.some((row) => row.currency && row.currency !== "PKR")) {
       columns.push(
         ["currency", "Currency"],
-        ["nominal_opening", "B/F in currency", "number"],
+        ...(periodMode
+          ? [["nominal_opening", "B/F in currency", "number"] as Column]
+          : []),
         ["nominal_debit", "In currency debit", "number"],
         ["nominal_credit", "In currency credit", "number"],
-        ["nominal_closing", "C/F in currency", "number"],
+        [
+          "nominal_closing",
+          allData ? "Balance in currency" : "C/F in currency",
+          "number",
+        ],
       );
     }
   } else if (type === "trial") rows = report.trial || [];
@@ -238,6 +260,7 @@ export function PeriodReports({
           type === "contact",
         )
       : activity;
+    if (allData) rows = rows.filter((row) => !row.summary_kind);
     columns = [
       ["date", "Date", "date"],
       ["document_id", "Document"],
@@ -281,7 +304,11 @@ export function PeriodReports({
             ? Math.max(
                 0,
                 Math.floor(
-                  (Date.parse(periodTo) - Date.parse(row.due_date)) / 86400000,
+                  (Date.parse(
+                    allData ? report.agingAsOf || pakistanToday() : periodTo,
+                  ) -
+                    Date.parse(row.due_date)) /
+                    86400000,
                 ),
               )
             : 0;
@@ -349,8 +376,7 @@ export function PeriodReports({
       Company: data.company.name,
       Report: reportName,
       Period: periodName,
-      From: periodFrom,
-      Through: periodTo,
+      ...(allData ? {} : { From: periodFrom, Through: periodTo }),
       "Base currency": "PKR",
       ...Object.fromEntries(
         columns.map(([key, heading]) => [heading, row[key] ?? ""]),
@@ -361,13 +387,17 @@ export function PeriodReports({
         Company: data.company.name,
         Report: reportName,
         Period: periodName,
-        From: periodFrom,
-        Through: periodTo,
+        ...(allData ? {} : { From: periodFrom, Through: periodTo }),
         "Base currency": "PKR",
         Account: "Net profit / loss",
         Amount: report.summary?.profit || "0.00",
       });
-    exportRows(`${reportName}-${periodFrom}-${periodTo}`, exported);
+    exportRows(
+      allData
+        ? `${reportName}-all-data`
+        : `${reportName}-${periodFrom}-${periodTo}`,
+      exported,
+    );
   };
   return (
     <section className="card">
@@ -438,9 +468,13 @@ export function PeriodReports({
         <span className="eyebrow">{data.company.name}</span>
         <h2>{reportName}</h2>
         <p>
-          {balanceReport
-            ? `As of ${dateLabel(periodTo)}`
-            : `During selected period: ${dateLabel(periodFrom)} — ${dateLabel(periodTo)}`}{" "}
+          {allData
+            ? allDataBalanceReport
+              ? "All recorded balances"
+              : "All recorded activity"
+            : balanceReport
+              ? `As of ${dateLabel(periodTo)}`
+              : `During selected period: ${dateLabel(periodFrom)} — ${dateLabel(periodTo)}`}{" "}
           · Base currency PKR
         </p>
         {periodMode && (
@@ -469,10 +503,18 @@ export function PeriodReports({
                 : ""}
             </p>
           )}
+        {allData && statement && (
+          <p>
+            Running balances include all recorded activity in posting-date
+            order.
+          </p>
+        )}
         {["receivables", "payables"].includes(type) && (
           <p>
-            Outstanding balances include unpaid documents from earlier periods
-            and are shown in each document’s currency.
+            {allData
+              ? `Outstanding balances include all recorded documents. Aging is measured as of ${dateLabel(report.agingAsOf || pakistanToday())}.`
+              : "Outstanding balances include unpaid documents from earlier periods."}{" "}
+            Amounts are shown in each document’s currency.
           </p>
         )}
       </div>
@@ -539,7 +581,11 @@ export function PeriodReports({
       ) : (
         <div className="empty-state">
           <h3>No activity for this report</h3>
-          <p>Try another date range or post a transaction to see it here.</p>
+          <p>
+            {allData
+              ? "Post a transaction to see it here."
+              : "Try another date range or post a transaction to see it here."}
+          </p>
         </div>
       )}
       {type === "profit" && (

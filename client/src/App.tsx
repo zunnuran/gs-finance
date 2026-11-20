@@ -415,13 +415,14 @@ export default function App() {
     company,
     can("transactions.view_periods"),
   );
-  const period = financialPeriod.period;
-  const periodSearch = period ? periodQuery(financialPeriod.value) : "";
-  const periodKey = period
-    ? `${period.from}/${period.to}/${period.mode}`
+  const selectedPeriod = financialPeriod.period;
+  const period = selectedPeriod?.mode === "all" ? null : selectedPeriod;
+  const periodSearch = selectedPeriod ? periodQuery(financialPeriod.value) : "";
+  const periodKey = selectedPeriod
+    ? `${selectedPeriod.from}/${selectedPeriod.to}/${selectedPeriod.mode}`
     : "legacy";
-  const viewFrom = period?.from || from,
-    viewTo = period?.to || to;
+  const viewFrom = selectedPeriod?.from || from,
+    viewTo = selectedPeriod?.to || to;
   const ownData = user?.dataScope === "own";
   const base = `/api/c/${company}`;
   const notify = (text: string) => {
@@ -555,7 +556,7 @@ export default function App() {
       ).then((docs) => {
         if (active) setDocuments(docs);
       }),
-      (period && can("transactions.view")
+      (selectedPeriod && can("transactions.view")
         ? api(`${base}/period-activity?${periodSearch}`)
         : Promise.resolve([])
       ).then((rows) => {
@@ -567,9 +568,11 @@ export default function App() {
           ).then((cash) => ({
             trial: cash,
             cashPosition: cash,
-            ...(period ? { period, balances: { accounts: cash } } : {}),
+            ...(selectedPeriod
+              ? { period: selectedPeriod, balances: { accounts: cash } }
+              : {}),
           }))
-        : period && can("transactions.view") && !can("reports.view")
+        : selectedPeriod && can("transactions.view") && !can("reports.view")
           ? Promise.all([
               api(`${base}/period-balances?${periodSearch}`),
               can("dashboard.view")
@@ -723,11 +726,13 @@ export default function App() {
       </div>
     );
   if (!user) return <Login onLogin={() => initial(true)} />;
-  const displayedDocuments = period ? periodActivity : documents;
+  const displayedDocuments = selectedPeriod ? periodActivity : documents;
   const currentReport =
     report &&
-    (!period ||
-      (report.period?.from === period.from && report.period?.to === period.to))
+    (!selectedPeriod ||
+      (report.period?.from === selectedPeriod.from &&
+        report.period?.to === selectedPeriod.to &&
+        report.period?.mode === selectedPeriod.mode))
       ? report
       : null;
   const selectDocument = (row: Row) => {
@@ -944,7 +949,7 @@ export default function App() {
           ) : (
             <>
               {loading && <div className="loading-bar" />}
-              {period &&
+              {selectedPeriod &&
                 [
                   "dashboard",
                   "transactions",
@@ -959,7 +964,7 @@ export default function App() {
                     onChange={financialPeriod.change}
                   />
                 )}
-              {!period && ["dashboard", "reports"].includes(page) && (
+              {!selectedPeriod && ["dashboard", "reports"].includes(page) && (
                 <div className="filterbar">
                   <div className="date-range">
                     <span>
@@ -1005,6 +1010,7 @@ export default function App() {
                 <Transactions
                   key={`${company}-${user.id}-${periodKey}`}
                   period={period || undefined}
+                  allData={selectedPeriod?.mode === "all"}
                   rows={filteredDocs}
                   query={query}
                   setQuery={setQuery}
@@ -1067,7 +1073,7 @@ export default function App() {
                   data={data}
                   to={viewTo}
                   from={viewFrom}
-                  periodLabel={period?.label}
+                  periodLabel={selectedPeriod?.label}
                   exportRows={exportCSV}
                 />
               )}
@@ -1544,11 +1550,11 @@ function Dashboard({
               </div>
               <strong>{money(amount)}</strong>
               <small>
-                {report?.period
+                {report?.period && report.period.mode !== "all"
                   ? `C/F · As of ${dateLabel(to)}`
                   : (sub as string)}
               </small>
-              {report?.period && (
+              {report?.period && report.period.mode !== "all" && (
                 <small>
                   B/F{" "}
                   {money(
@@ -1568,7 +1574,13 @@ function Dashboard({
             <div>
               <h2>Income & expenses</h2>
               <p>
-                During selected period · {dateLabel(from)} — {dateLabel(to)}
+                {report?.period?.mode === "all" ? (
+                  "All recorded activity · No date filter"
+                ) : (
+                  <>
+                    During selected period · {dateLabel(from)} — {dateLabel(to)}
+                  </>
+                )}
               </p>
             </div>
             <span className="muted-label">PKR</span>
@@ -1955,6 +1967,7 @@ function MasterPage({
     )
     .sort((a, b) => (table === "categories" ? a.position - b.position : 0));
   const balance = (row: Row) =>
+    report?.balances?.accounts?.find((a: Row) => a.id === row.id)?.closing ??
     report?.trial?.find((a: Row) => a.id === row.id)?.balance ??
     report?.cashPosition?.find((a: Row) => a.id === row.id)?.balance ??
     0;
@@ -2090,10 +2103,7 @@ function MasterPage({
         )}
         <button
           className="button secondary compact"
-          disabled={
-            !rows.length ||
-            (!!period && table === "accounts" && !report?.balances?.accounts)
-          }
+          disabled={!rows.length || (table === "accounts" && !report)}
           onClick={() =>
             exportCSV(
               period ? `${page}-${period.from}-${period.to}` : page,
@@ -2112,7 +2122,24 @@ function MasterPage({
                     nominal_credit: periodBalance(row, "nominal_credit"),
                     nominal_closing: periodBalance(row, "nominal_closing"),
                   }))
-                : rows,
+                : table === "accounts"
+                  ? rows.map((row) => ({
+                      ...row,
+                      view:
+                        report?.period?.mode === "all"
+                          ? "All data"
+                          : "Balances",
+                      balance_pkr: balance(row),
+                      ...(report?.balances?.accounts
+                        ? {
+                            balance_in_currency: periodBalance(
+                              row,
+                              "nominal_closing",
+                            ),
+                          }
+                        : {}),
+                    }))
+                  : rows,
             )
           }
         >
@@ -2138,7 +2165,6 @@ function MasterPage({
                         {header("closing", "C/F · PKR", true)}
                       </>
                     ) : (
-                      page === "accounts" &&
                       header("balance", "Balance · PKR", true)
                     )}
                   </>
@@ -2173,31 +2199,40 @@ function MasterPage({
                     <>
                       <td>{title(page === "accounts" ? r.purpose : r.type)}</td>
                       <td>{r.currency}</td>
-                      {period
-                        ? ["opening", "debit", "credit", "closing"].map(
-                            (field) => (
-                              <td className="align-right amount" key={field}>
-                                {report
-                                  ? formatLedgerAmount(periodBalance(r, field))
-                                  : "—"}
-                                {r.currency !== "PKR" && (
-                                  <small>
-                                    {r.currency}{" "}
-                                    {report
-                                      ? formatLedgerAmount(
-                                          periodBalance(r, `nominal_${field}`),
-                                        )
-                                      : "—"}
-                                  </small>
-                                )}
-                              </td>
-                            ),
-                          )
-                        : page === "accounts" && (
-                            <td className="align-right amount">
-                              {money(balance(r))}
+                      {period ? (
+                        ["opening", "debit", "credit", "closing"].map(
+                          (field) => (
+                            <td className="align-right amount" key={field}>
+                              {report
+                                ? formatLedgerAmount(periodBalance(r, field))
+                                : "—"}
+                              {r.currency !== "PKR" && (
+                                <small>
+                                  {r.currency}{" "}
+                                  {report
+                                    ? formatLedgerAmount(
+                                        periodBalance(r, `nominal_${field}`),
+                                      )
+                                    : "—"}
+                                </small>
+                              )}
                             </td>
-                          )}
+                          ),
+                        )
+                      ) : (
+                        <td className="align-right amount">
+                          {report ? money(balance(r)) : "—"}
+                          {report?.period?.mode === "all" &&
+                            r.currency !== "PKR" && (
+                              <small>
+                                {r.currency}{" "}
+                                {formatLedgerAmount(
+                                  periodBalance(r, "nominal_closing"),
+                                )}
+                              </small>
+                            )}
+                        </td>
+                      )}
                     </>
                   )}
                   {table === "categories" && (

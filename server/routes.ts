@@ -25,7 +25,11 @@ import {
 } from "./accounting";
 import { reports } from "./reports";
 import { permissionKeys } from "../shared/permissions";
-import { periodFromQuery, type ResolvedPeriod } from "../shared/period";
+import {
+  pakistanToday,
+  periodFromQuery,
+  type ResolvedPeriod,
+} from "../shared/period";
 import Decimal from "decimal.js";
 import { documentSchema } from "../shared/domain";
 import { administrator } from "./config";
@@ -942,6 +946,8 @@ export function registerRoutes(app: Express) {
         id(req.params.company),
         period!.from,
         period!.to,
+        null,
+        period!.mode === "all" ? pakistanToday() : period!.to,
       );
       const position = (summary: typeof result.openingSummary) => ({
         bank: summary.bank,
@@ -951,6 +957,7 @@ export function registerRoutes(app: Express) {
       });
       res.json({
         period,
+        agingAsOf: result.agingAsOf,
         summary: position(result.summary),
         openingSummary: position(result.openingSummary),
         balances: {
@@ -993,6 +1000,7 @@ export function registerRoutes(app: Express) {
         from,
         to,
         null,
+        period?.mode === "all" ? pakistanToday() : to,
       );
       const {
         byProject,

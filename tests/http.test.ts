@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname, basename } from "node:path";
 import { createServer } from "node:net";
 import pg from "pg";
+import { pakistanToday } from "../shared/period";
 
 // Explicit opt-in only. Every run gets a dedicated schema, app process and upload folder.
 // Production and local-development schemas are never reset or truncated.
@@ -3124,12 +3125,19 @@ describe(
         "period-balances",
         "reports",
         "my-cash",
-      ])
+      ]) {
         assert.equal(
           (await request(`${prefix}/${endpoint}?${month}`, { cookie })).response
             .status,
           403,
         );
+        assert.equal(
+          (await request(`${prefix}/${endpoint}?period=all`, { cookie }))
+            .response.status,
+          403,
+          "All data does not bypass the period feature permission",
+        );
+      }
       await ok(`${prefix}/reports?from=2026-11-01&to=2026-11-30`, { cookie });
 
       await setAccess(true);
@@ -3301,6 +3309,14 @@ describe(
           );
       };
       assertLimitedReport(balances);
+      const allBalances = await ok(`${prefix}/period-balances?period=all`, {
+        cookie,
+      });
+      assert.equal(allBalances.period.mode, "all");
+      assert.equal(allBalances.summary.bank, "1000.00");
+      assert.equal(allBalances.openingSummary.bank, "0.00");
+      assertLimitedReport(allBalances);
+      assert.equal(allBalances.agingAsOf, pakistanToday());
       assert.equal(
         (await request(`${prefix}/reports?${month}`, { cookie })).response
           .status,
@@ -3611,6 +3627,40 @@ describe(
       assert.equal(Number(idleBank.debit), 0);
       assert.equal(Number(idleBank.credit), 0);
       assert.deepEqual(empty.ledger, []);
+      const allReport = await ok(`${prefix}/reports?period=all`);
+      const allRows = await ok(`${prefix}/period-activity?period=all`);
+      assert.equal(allReport.period.mode, "all");
+      assert.equal(allReport.summary.bank, "70500.00");
+      assert.equal(allReport.summary.revenue, "21000.00");
+      assert.equal(allReport.summary.expenses, "2000.00");
+      assert.equal(allReport.openingSummary.bank, "0.00");
+      assert.deepEqual(
+        allRows
+          .filter((r: any) => r.activity_type === "document")
+          .map((r: any) => r.id)
+          .sort((a: number, b: number) => a - b),
+        current.map((r: any) => r.id).sort((a: number, b: number) => a - b),
+        "Clearing the filter restores earlier and later documents, including pending and cancelled history",
+      );
+      assert.ok(allRows.some((r: any) => r.id === laterPayment.id));
+      assert.ok(
+        allRows.some(
+          (r: any) => r.id === expense.id && r.activity_type === "reversal",
+        ),
+      );
+      assert.equal(allReport.agingReceivables.length, 0);
+      assert.equal(allReport.agingPayables[0].outstanding, "1500.00");
+      assert.equal(allReport.agingAsOf, pakistanToday());
+      assert.equal(
+        allReport.agingPayables[0].daysOverdue,
+        Math.max(
+          0,
+          Math.floor(
+            (Date.parse(allReport.agingAsOf) - Date.parse("2026-11-06")) /
+              86400000,
+          ),
+        ),
+      );
       assert.equal(
         (
           await control.query(
@@ -3791,9 +3841,33 @@ describe(
       assert.equal(redactedFunding.can_manage, false);
       assert.deepEqual(redactedFunding.extra, {});
       assert.ok(!JSON.stringify(activity).includes("PRIVATE"));
+      const allCash = await ok(`${prefix}/my-cash?period=all`, { cookie });
+      assert.deepEqual(
+        allCash.map((r: any) => r.id),
+        [ownCash.id],
+      );
+      assert.equal(allCash[0].balance, "47900.00");
+      assert.equal(Number(allCash[0].opening), 0);
+      const allActivity = await ok(`${prefix}/period-activity?period=all`, {
+        cookie,
+      });
+      const currentOwnDocuments = await ok(`${prefix}/documents`, { cookie });
+      assert.deepEqual(
+        allActivity
+          .filter((r: any) => r.activity_type === "document")
+          .map((r: any) => r.id)
+          .sort((a: number, b: number) => a - b),
+        currentOwnDocuments
+          .map((r: any) => r.id)
+          .sort((a: number, b: number) => a - b),
+      );
+      assert.ok(allActivity.some((r: any) => r.id === future.id));
+      assert.ok(!JSON.stringify(allActivity).includes("PRIVATE"));
       for (const path of [
         `${prefix}/reports?${query}`,
         `${prefix}/period-balances?${query}`,
+        `${prefix}/reports?period=all`,
+        `${prefix}/period-balances?period=all`,
         `/api/c/${otherCompany}/period-activity?${query}`,
         `/api/c/${otherCompany}/my-cash?${query}`,
         `${prefix}/documents/${privateExpense.id}/ledger`,
