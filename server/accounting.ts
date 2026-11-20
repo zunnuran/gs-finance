@@ -34,6 +34,52 @@ export async function assertActiveDocument(
     input.salvage !== undefined
   )
     fail("Fixed assets are no longer managed in this app", 410);
+  if (input.kind === "capital_purchase") {
+    if (
+      input.targetId ||
+      input.headId ||
+      input.categoryId ||
+      input.relatedId ||
+      input.otherCompanyId ||
+      input.projectId ||
+      input.dueDate ||
+      input.targetAmount !== undefined ||
+      input.targetRate !== undefined
+    )
+      fail(
+        "Asset purchases use only a payment account, amount and optional vendor",
+      );
+    if (!input.sourceId)
+      fail("Select a bank or cash account for the asset purchase");
+    if (
+      !(
+        await c.query(
+          "SELECT 1 FROM accounts WHERE id=$1 AND company_id=$2 AND type='asset' AND purpose IN ('bank','cash') AND active",
+          [input.sourceId, company],
+        )
+      ).rows.length
+    )
+      fail("Select an active bank or cash account belonging to this company");
+    if (
+      !(
+        await c.query(
+          "SELECT 1 FROM accounts WHERE company_id=$1 AND type='asset' AND purpose='fixed_asset' AND active AND NOT restricted",
+          [company],
+        )
+      ).rows.length
+    )
+      fail("An active non-private Fixed assets account is required");
+    if (
+      input.contactId &&
+      !(
+        await c.query(
+          "SELECT 1 FROM contacts WHERE id=$1 AND company_id=$2 AND kind='vendor' AND active",
+          [input.contactId, company],
+        )
+      ).rows.length
+    )
+      fail("Select an active vendor belonging to this company");
+  }
   // Capital bills must not bypass removal of the fixed-asset workflow.
   if (input.kind === "bill") {
     const head = (
@@ -280,9 +326,24 @@ export async function postDocument(
     company,
     {
       kind: d.kind,
+      sourceId: d.source_id,
+      targetId: d.target_id,
       headId: d.head_id,
       categoryId: d.category_id,
+      contactId: d.contact_id,
       projectId: d.project_id,
+      relatedId: d.related_id,
+      otherCompanyId: d.other_company_id,
+      dueDate: d.due_date,
+      targetAmount: d.extra.targetAmount,
+      targetRate: d.extra.targetRate,
+      ...(d.kind === "capital_purchase"
+        ? {
+            assetName: d.extra.assetName,
+            usefulLife: d.extra.usefulLife,
+            salvage: d.extra.salvage,
+          }
+        : {}),
     },
     { allowLegacyProject: true },
   );
@@ -376,6 +437,17 @@ export async function postDocument(
       break;
     case "expense":
       debit = account(head, ["expense"]);
+      credit = account(d.source_id, ["asset"], true);
+      break;
+    case "capital_purchase":
+      debit =
+        accounts.find(
+          (a) =>
+            a.type === "asset" &&
+            a.purpose === "fixed_asset" &&
+            a.active &&
+            !a.restricted,
+        )?.id ?? fail("An active non-private Fixed assets account is required");
       credit = account(d.source_id, ["asset"], true);
       break;
     case "bill":

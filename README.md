@@ -43,7 +43,7 @@ In **Transactions**, select up to 100 eligible Pending entries and choose **Post
 
 The transaction table initially shows all 23 detail columns and scrolls horizontally. Use **Columns** to show or hide fields, with choices remembered for each user in that browser. Click a column heading to sort ascending, then click it again to sort descending; the arrow shows the current direction. Amounts and dates sort by their underlying values, and blank values stay last. CSV exports include the filtered transactions and visible columns in the displayed order. Sorting preserves selected transaction IDs; **Select all** chooses the first 100 eligible entries in the displayed order. Column sorting is also available in the other main data tables, including accounts, contacts, reports, audit history, and users.
 
-Projects, Fixed Assets, People & Advances, and Reconciliation are no longer available as modules or new transaction workflows. Clients & Receivables, Vendors & Payables, Bank & Cash, reports, categories, chart of accounts, users, and audit history remain. Basic cash custodians are managed from Bank & Cash. Existing project, asset, and advance records are retained for historical accounting; integration with another app is not yet implemented.
+Projects, the Fixed Assets register, People & Advances, and Reconciliation are no longer available as modules. Clients & Receivables, Vendors & Payables, Bank & Cash, reports, categories, chart of accounts, users, and audit history remain. Basic cash custodians are managed from Bank & Cash. **Record asset purchase** records a paid purchase in the ledger without restoring the asset register or depreciation workflow. Existing project, asset, and advance records are retained for historical accounting; integration with another app is not yet implemented.
 
 ## Upgrade to the simplified workflow
 
@@ -53,13 +53,27 @@ Back up PostgreSQL before upgrading, build the updated source, and restart the a
 
 Action permissions and data visibility are separate. In **Users & permissions**, edit a user and select **Data visibility → Own data only**. Grant their company access and link their employee/custodian record for each company. Cash accounts assigned to that custodian appear in **My cash**.
 
-Own-data users can view their permitted transactions and the cash assigned to their linked custodian record. Finance-created funding records are read-only. They can save their own cash expenses and transfers as Pending; posting and reversal require the corresponding action permission and never expand data visibility.
+Own-data users can view their permitted transactions and the cash assigned to their linked custodian record. Finance-created funding records are read-only. They can save their own cash expenses and transfers as Pending, and paid asset purchases when explicitly granted **Record asset purchases**; posting and reversal require the corresponding action permission and never expand data visibility.
 
-Company income, bank balances, payroll/private accounts, other employees, customer records, company reports, assets, audit history, reconciliation, and administration are excluded from own-data access. Restricted requests are checked on the server, including guessed transaction/attachment IDs and pending records created before a user's scope changed. Basic vendor names remain available for entering expenses, without vendor contact, tax, or bank details. A restricted user's own assigned cash balance includes all movements in that cash account.
+Company income, bank balances, payroll/private accounts, other employees, customer records, company reports, the asset register and balances, audit history, reconciliation, and administration are excluded from own-data access. Restricted requests are checked on the server, including guessed transaction/attachment IDs and pending records created before a user's scope changed. Basic vendor names remain available for entering expenses and purchases, without vendor contact, tax, or bank details. A restricted user's own assigned cash balance includes all movements in that cash account.
 
 The standard **Employee expenses** account is private by default, covering seeded salary and bonus categories. Mark any custom payroll or sensitive account **Private financial account** in the chart of accounts; its transactions and categories will also be hidden. Posted account classifications are checked even if the category is later remapped.
 
 **Inherit role** gives employees own-data visibility and other roles company visibility. **All assigned company data** grants company-wide reading within existing company memberships. Super administrators retain full access. An explicit own-data setting takes precedence over broad role/action permissions. Employee links are company-validated and can belong to only one login.
+
+## Asset purchases from assigned cash
+
+Keep the user's **Data visibility → Own data only**. In **Users & permissions → Users → Manage**, grant **Record asset purchases** (`transactions.purchase_assets`) and **Create transactions**, plus **Post transactions** if the user should post purchases themselves. The purchase permission is opt-in for staff, including Finance; an administrator can also enable it for a role. Existing roles are not changed on upgrade. Link the user to the relevant cash custodian and assign that custodian's cash account as usual.
+
+Choose **New transaction → Record asset purchase**, select the assigned cash account, enter the asset description, date, amount and receipt, then **Save pending**. An authorized user can **Post transaction** to debit Fixed assets and credit the paying cash account automatically. This is a paid-purchase workflow; it does not create an asset-register item, depreciation schedule or vendor payable. Posting requires both the purchase and posting permissions. Purchases cannot use arbitrary accounting heads, other people's cash or company bank accounts when the user has own-data visibility. Reports, bank balances, private records and other users' purchases remain hidden. Existing own purchases remain readable after the purchase permission is revoked.
+
+## Accounting adjustment access
+
+In **Users & permissions → Users → Manage**, enable **Accounting adjustments & opening balances** (`accounting.manage`) plus **Create transactions** (`transactions.create`). Enable **Post transactions** (`transactions.post`) if that user should post the entry. The Finance role includes these permissions by default; existing role customizations and individual Disabled overrides are preserved. The role-wide switch is under **Roles & permissions → Finance → Manage**.
+
+The user's **Data visibility** must be **All assigned company data**, or **Inherit role** for Finance. **Own data only** excludes accounting adjustments regardless of an enabled override. After an administrator changes access, the affected user can click **Refresh data** to update the available actions; older deployments require a browser reload.
+
+Use **Record asset purchase** for a paid asset purchase from assigned cash. **Accounting adjustment** is the separate advanced action for authorized company-wide accountants who need to choose both debit and credit accounts.
 
 ## Development commands
 
@@ -129,7 +143,7 @@ After initial provisioning, use **Change password** for your password and **User
 - Customer invoices and vendor bills can be settled in parts. Payments are allocated to an outstanding document, and overpayments are rejected.
 - Foreign-currency documents retain their nominal amount and the entered PKR exchange rate. Reports present base-currency totals. Rates are entered manually; no live exchange-rate feed is configured.
 - Foreign bank/cash outflows release their average PKR carrying value and recognize exchange differences. Same-currency transfers preserve carrying value; cross-currency transfers record the actual received amount. Foreign account transactions must be entered chronologically, and later foreign account transactions must be reversed before earlier ones.
-- Existing asset purchases and depreciation remain in transaction history and financial reports. The app no longer creates asset records or posts depreciation.
+- Existing asset purchases and depreciation remain in transaction history and financial reports. New paid asset purchases can be recorded in the ledger through the dedicated permission-controlled action. The app does not create asset-register records or post depreciation.
 - Existing unpaid asset purchases and capital bills can still be settled through Vendors & Payables. Historical asset records and project associations are preserved.
 - Posted journals are retained. Corrections use reversal and a replacement transaction. Locked periods prevent backdated posting; authorized users manage the lock date.
 - Inter-company transfers post both companies together. Both entities must exist in the same application database, and the acting user needs access to both.

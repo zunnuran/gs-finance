@@ -64,6 +64,13 @@ const retiredDocumentSql = `(
     OR EXISTS (SELECT 1 FROM assets legacy_asset WHERE legacy_asset.document_id=d.id)
   ))
 )`;
+function assertPurchasePermission(actor: Request["actor"], kind: string) {
+  if (
+    kind === "capital_purchase" &&
+    !actor.permissions.includes("transactions.purchase_assets")
+  )
+    fail("Asset purchase permission is required", 403);
+}
 async function postAccessibleDocument(
   c: Connection,
   actor: Request["actor"],
@@ -86,6 +93,7 @@ async function postAccessibleDocument(
     fail("Transaction not found");
   }
   const input = documentInput(current);
+  assertPurchasePermission(actor, current.kind);
   if (actor.dataScope === "own")
     // Historical project links do not expand access; new links remain disabled.
     await assertOwnInput(c, actor, company, { ...input, projectId: null });
@@ -478,9 +486,10 @@ export function registerRoutes(app: Express) {
       if (
         req.actor.dataScope !== "own" &&
         req.actor.role === "employee" &&
-        req.body.kind !== "expense"
+        !["expense", "capital_purchase"].includes(req.body.kind)
       )
-        fail("Employees can create expenses");
+        fail("Employees can create expenses or permitted asset purchases");
+      assertPurchasePermission(req.actor, req.body.kind);
       if (
         ["opening", "adjustment"].includes(req.body.kind) &&
         !req.actor.permissions.includes("accounting.manage")
@@ -510,7 +519,7 @@ export function registerRoutes(app: Express) {
       await assertOwnDocument(pool, req.actor, company, documentId);
       const document = (
         await pool.query(
-          `SELECT status FROM documents WHERE id=$1 AND (
+          `SELECT status,kind FROM documents WHERE id=$1 AND (
             company_id=$2 OR (kind='intercompany' AND other_company_id=$2 AND status IN ('posted','reversed'))
           )`,
           [documentId, company],
@@ -534,7 +543,7 @@ export function registerRoutes(app: Express) {
       ).rows;
       const lines = (
         await pool.query(
-          `SELECT l.id,l.journal_id,l.account_id,a.code account_code,a.name account_name,
+          `SELECT l.id,l.journal_id,l.account_id,a.code account_code,a.name account_name,a.purpose account_purpose,
             l.debit,l.credit,l.currency,l.foreign_amount
           FROM journal_lines l JOIN journals j ON j.id=l.journal_id
           JOIN accounts a ON a.id=l.account_id AND a.company_id=l.company_id
@@ -548,13 +557,17 @@ export function registerRoutes(app: Express) {
           ...journal,
           lines: lines
             .filter((line) => line.journal_id === journal.id)
-            .map(({ journal_id, ...line }) =>
+            .map(({ journal_id, account_purpose, ...line }) =>
               visibleAccounts && !visibleAccounts.has(line.account_id)
                 ? {
                     ...line,
                     account_id: null,
                     account_code: null,
-                    account_name: "Other account",
+                    account_name:
+                      document.kind === "capital_purchase" &&
+                      account_purpose === "fixed_asset"
+                        ? "Fixed assets"
+                        : "Other account",
                   }
                 : line,
             ),
@@ -571,6 +584,7 @@ export function registerRoutes(app: Express) {
           const company = id(req.params.company),
             doc = id(req.params.id),
             d = documentSchema.parse(req.body);
+          assertPurchasePermission(req.actor, d.kind);
           await assertOwnDocument(c, req.actor, company, doc, true);
           await assertOwnInput(c, req.actor, company, d);
           await assertActiveDocument(c, company, d);
@@ -581,6 +595,7 @@ export function registerRoutes(app: Express) {
                 [doc, company],
               )
             ).rows[0] ?? fail("Document not found");
+          assertPurchasePermission(req.actor, before.kind);
           if (before.status !== "pending")
             fail("Only pending transactions can be edited");
           await assertActiveDocument(c, company, documentInput(before), {
@@ -589,9 +604,12 @@ export function registerRoutes(app: Express) {
           if (
             req.actor.dataScope !== "own" &&
             req.actor.role === "employee" &&
-            (before.created_by !== req.actor.id || d.kind !== "expense")
+            (before.created_by !== req.actor.id ||
+              !["expense", "capital_purchase"].includes(d.kind))
           )
-            fail("Employees can edit their own pending expenses");
+            fail(
+              "Employees can edit their own pending expenses or permitted asset purchases",
+            );
           if (
             ["opening", "adjustment"].includes(d.kind) &&
             !req.actor.permissions.includes("accounting.manage")
@@ -779,6 +797,7 @@ export function registerRoutes(app: Express) {
                   [doc, company],
                 )
               ).rows[0] ?? fail("Transaction not found");
+            assertPurchasePermission(req.actor, d.kind);
             if (
               d.other_company_id &&
               !(await canAccess(req.actor, d.other_company_id))
@@ -910,6 +929,7 @@ export function registerRoutes(app: Express) {
           id(req.params.company),
         ])
       ).rows[0] ?? fail("Document not found");
+    if (req.method !== "GET") assertPurchasePermission(req.actor, d.kind);
     if (
       req.actor.dataScope !== "own" &&
       req.actor.role === "employee" &&

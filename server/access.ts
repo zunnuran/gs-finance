@@ -13,7 +13,8 @@ const ownContacts = `SELECT contact_id FROM user_contacts WHERE user_id=$2 AND c
 // Use the posted accounts as well as the current category mapping: remapping a
 // category must never expose a historical payroll journal.
 export const ownDocumentWhere = `d.company_id=$1 AND d.other_company_id IS NULL
-  AND d.kind IN ('expense','advance','advance_expense','advance_return','withdrawal','transfer')
+  AND d.kind IN ('expense','capital_purchase','advance','advance_expense','advance_return','withdrawal','transfer')
+  AND (d.kind<>'capital_purchase' OR d.source_id IN (${ownCash}))
   AND (d.created_by=$2 OR d.contact_id IN (${ownContacts}) OR d.source_id IN (${ownCash}) OR d.target_id IN (${ownCash}))
   AND NOT EXISTS (SELECT 1 FROM accounts a WHERE (a.id=d.head_id OR a.id=(SELECT account_id FROM categories WHERE id=d.category_id)) AND (a.restricted OR a.type='revenue'))
   AND NOT EXISTS (SELECT 1 FROM journals j JOIN journal_lines l ON l.journal_id=j.id JOIN accounts a ON a.id=l.account_id WHERE j.document_id=d.id AND (a.restricted OR a.type='revenue'))`;
@@ -150,7 +151,10 @@ export async function assertOwnInput(
   d: Partial<DocumentInput>,
 ) {
   if (actor.dataScope !== "own") return;
-  if (!["expense", "transfer"].includes(d.kind || "") || d.otherCompanyId)
+  if (
+    !["expense", "transfer", "capital_purchase"].includes(d.kind || "") ||
+    d.otherCompanyId
+  )
     denyScope();
   const data = await ownBootstrap(c, actor, company);
   const cash = new Set(
@@ -168,6 +172,19 @@ export async function assertOwnInput(
   if (d.contactId && !data.contacts.some((ct) => ct.id === d.contactId))
     denyScope();
   if (d.kind === "expense" && !cash.has(d.sourceId)) denyScope();
+  if (
+    d.kind === "capital_purchase" &&
+    (!cash.has(d.sourceId) ||
+      d.targetId ||
+      d.headId ||
+      d.categoryId ||
+      d.relatedId ||
+      (d.contactId &&
+        !data.contacts.some(
+          (ct) => ct.id === d.contactId && ct.kind === "vendor",
+        )))
+  )
+    denyScope();
   if (d.kind === "transfer" && (!cash.has(d.sourceId) || !cash.has(d.targetId)))
     denyScope();
   if (d.relatedId) denyScope();
@@ -184,5 +201,15 @@ export function documentInput(d: any): Partial<DocumentInput> {
     projectId: d.project_id,
     relatedId: d.related_id,
     otherCompanyId: d.other_company_id,
+    dueDate: d.due_date,
+    targetAmount: d.extra?.targetAmount,
+    targetRate: d.extra?.targetRate,
+    ...(d.kind === "capital_purchase"
+      ? {
+          assetName: d.extra?.assetName,
+          usefulLife: d.extra?.usefulLife,
+          salvage: d.extra?.salvage,
+        }
+      : {}),
   };
 }

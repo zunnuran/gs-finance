@@ -1210,6 +1210,561 @@ describe(
       );
     });
 
+    test("finance can record paid asset adjustments and accounting overrides take effect in the same session", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Finance adjustment permissions" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const profile = {
+        username: "http_finance_adjustments",
+        full_name: "Finance adjustments",
+        role_id: roles.find((role) => role.name === "finance").id,
+        active: true,
+        companies: [fixtureCompany.id],
+        data_scope: null,
+      };
+      const user = await ok("/api/admin/users", {
+        method: "POST",
+        body: { ...profile, password, overrides: {} },
+      });
+      const cookie = await login(profile.username);
+      const actor = await ok("/api/auth/user", { cookie });
+      assert.equal(actor.role, "finance");
+      assert.equal(actor.dataScope, "company");
+      assert.ok(actor.permissions.includes("accounting.manage"));
+      assert.ok(actor.permissions.includes("transactions.create"));
+      assert.ok(actor.permissions.includes("transactions.post"));
+      assert.ok(!actor.permissions.includes("users.manage"));
+      const bootstrap = await ok(`${prefix}/bootstrap`, { cookie });
+      const fixedAsset = bootstrap.accounts.find(
+        (account: any) => account.purpose === "fixed_asset",
+      );
+      assert.ok(fixedAsset);
+      const paymentAccount = await ok(`${prefix}/accounts`, {
+        method: "POST",
+        body: {
+          code: "ADJUSTMENT-BANK",
+          name: "Asset purchase bank",
+          type: "asset",
+          purpose: "bank",
+          currency: "PKR",
+        },
+      });
+      const opening = await ok(`${prefix}/documents`, {
+        method: "POST",
+        body: {
+          kind: "opening",
+          date: "2026-10-01",
+          amount: "10000",
+          description: "Adjustment test funding",
+          targetId: paymentAccount.id,
+        },
+      });
+      await ok(`${prefix}/documents/${opening.id}/post`, {
+        method: "POST",
+        body: {},
+      });
+      const input = {
+        kind: "adjustment",
+        date: "2026-10-02",
+        amount: "3000",
+        currency: "PKR",
+        description: "Workstation purchased with company bank funds",
+        sourceId: paymentAccount.id,
+        targetId: fixedAsset.id,
+      };
+      const create = () =>
+        ok(`${prefix}/documents`, {
+          method: "POST",
+          cookie,
+          body: input,
+        });
+      const purchase = await create();
+      assert.equal(purchase.status, "pending");
+      const posted = await ok(`${prefix}/documents/${purchase.id}/post`, {
+        method: "POST",
+        cookie,
+        body: {},
+      });
+      assert.equal(posted.status, "posted");
+      const lines = (
+        await control.query(
+          `SELECT l.account_id,l.debit,l.credit FROM ${schema}.journal_lines l
+         JOIN ${schema}.journals j ON j.id=l.journal_id
+         WHERE j.document_id=$1 ORDER BY l.account_id`,
+          [purchase.id],
+        )
+      ).rows;
+      assert.deepEqual(lines, [
+        { account_id: fixedAsset.id, debit: "3000.00", credit: "0.00" },
+        { account_id: paymentAccount.id, debit: "0.00", credit: "3000.00" },
+      ]);
+      assert.equal(
+        Number(
+          (
+            await control.query(
+              `SELECT count(*) FROM ${schema}.assets WHERE company_id=$1`,
+              [fixtureCompany.id],
+            )
+          ).rows[0].count,
+        ),
+        0,
+        "An adjustment records the ledger entry without recreating asset management",
+      );
+      const pending = await create();
+      const setAccounting = (enabled: boolean) =>
+        ok("/api/admin/users", {
+          method: "POST",
+          body: {
+            ...profile,
+            id: user.id,
+            overrides: { "accounting.manage": enabled },
+          },
+        });
+      await setAccounting(false);
+      const deniedActor = await ok("/api/auth/user", { cookie });
+      assert.ok(!deniedActor.permissions.includes("accounting.manage"));
+      assert.ok(deniedActor.permissions.includes("transactions.post"));
+      for (const [path, body] of [
+        [`${prefix}/documents`, input],
+        [`${prefix}/documents/${pending.id}/post`, {}],
+      ] as const) {
+        const denied = await request(path, { method: "POST", cookie, body });
+        assert.equal(denied.response.status, 400);
+        assert.match(denied.data.message, /Accounting permission is required/);
+      }
+      await setAccounting(true);
+      const enabledActor = await ok("/api/auth/user", { cookie });
+      assert.ok(enabledActor.permissions.includes("accounting.manage"));
+      assert.equal(
+        (
+          await ok(`${prefix}/documents/${pending.id}/post`, {
+            method: "POST",
+            cookie,
+            body: {},
+          })
+        ).status,
+        "posted",
+      );
+      assert.equal((await create()).status, "pending");
+    });
+
+    test("restricted Finance can purchase assets from assigned cash without gaining company data or manual accounting access", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Restricted asset purchasing" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const master = (table: string, body: any) =>
+        ok(`${prefix}/${table}`, { method: "POST", body });
+      const setup = await ok(`${prefix}/bootstrap`);
+      const fixedAsset = setup.accounts.find(
+        (a: any) => a.purpose === "fixed_asset",
+      );
+      const office = setup.accounts.find((a: any) => a.purpose === "office");
+      const payroll = setup.accounts.find(
+        (a: any) => a.purpose === "employee_expense",
+      );
+      const custodian = await master("contacts", {
+        name: "Asset buyer",
+        kind: "employee",
+      });
+      const colleague = await master("contacts", {
+        name: "Other asset buyer",
+        kind: "employee",
+      });
+      const vendor = await master("contacts", {
+        name: "Hardware supplier",
+        kind: "vendor",
+        bank_details: "CONFIDENTIAL VENDOR BANK",
+      });
+      const bankAccount = await master("accounts", {
+        code: "CAPITAL-BANK",
+        name: "CONFIDENTIAL COMPANY BANK",
+        type: "asset",
+        purpose: "bank",
+      });
+      const cash = await master("accounts", {
+        code: "CAPITAL-CASH",
+        name: "Asset buyer cash",
+        type: "asset",
+        purpose: "cash",
+        custodian_id: custodian.id,
+      });
+      const otherCash = await master("accounts", {
+        code: "CAPITAL-OTHER",
+        name: "CONFIDENTIAL OTHER CASH",
+        type: "asset",
+        purpose: "cash",
+        custodian_id: colleague.id,
+      });
+      const adminPost = async (body: any) => {
+        const doc = await master("documents", {
+          date: "2026-10-01",
+          description: "Asset purchase fixture funding",
+          ...body,
+        });
+        await ok(`${prefix}/documents/${doc.id}/post`, {
+          method: "POST",
+          body: {},
+        });
+        return doc;
+      };
+      await adminPost({
+        kind: "opening",
+        amount: "50000",
+        targetId: bankAccount.id,
+      });
+      await adminPost({
+        kind: "withdrawal",
+        amount: "10000",
+        sourceId: bankAccount.id,
+        targetId: cash.id,
+      });
+      await adminPost({
+        kind: "withdrawal",
+        amount: "5000",
+        sourceId: bankAccount.id,
+        targetId: otherCash.id,
+      });
+      const profile = {
+        username: "http_restricted_asset_buyer",
+        full_name: "Restricted asset buyer",
+        role_id: roles.find((r) => r.name === "finance").id,
+        active: true,
+        companies: [fixtureCompany.id],
+        data_scope: "own",
+        employee_links: [
+          { company_id: fixtureCompany.id, contact_id: custodian.id },
+        ],
+      };
+      const user = await ok("/api/admin/users", {
+        method: "POST",
+        body: {
+          ...profile,
+          password,
+          overrides: { "transactions.post": false },
+        },
+      });
+      const cookie = await login(profile.username);
+      const setAccess = (
+        purchase: boolean,
+        post: boolean,
+        employee_links = profile.employee_links,
+      ) =>
+        ok("/api/admin/users", {
+          method: "POST",
+          body: {
+            ...profile,
+            id: user.id,
+            employee_links,
+            overrides: {
+              "transactions.purchase_assets": purchase,
+              "transactions.post": post,
+            },
+          },
+        });
+      const input = {
+        kind: "capital_purchase",
+        date: "2026-10-02",
+        amount: "1000",
+        sourceId: cash.id,
+        contactId: vendor.id,
+        description: "Workstation bought with my assigned cash",
+      };
+      const create = (overrides: any = {}) =>
+        ok(`${prefix}/documents`, {
+          method: "POST",
+          cookie,
+          body: { ...input, ...overrides },
+        });
+      const denied = async (
+        path: string,
+        options: Parameters<typeof request>[1] = {},
+        expected = [400, 403, 410],
+      ) => {
+        const response = await request(path, { cookie, ...options });
+        assert.ok(
+          expected.includes(response.response.status),
+          `${path}: expected rejection, got ${response.response.status}: ${JSON.stringify(response.data)}`,
+        );
+        return response;
+      };
+      const defaultActor = await ok("/api/auth/user", { cookie });
+      assert.equal(defaultActor.dataScope, "own");
+      assert.ok(
+        !defaultActor.permissions.includes("transactions.purchase_assets"),
+        "Asset purchasing is explicitly granted, not inherited automatically",
+      );
+      await denied(
+        `${prefix}/documents`,
+        { method: "POST", body: input },
+        [403],
+      );
+      await setAccess(true, false);
+      const actor = await ok("/api/auth/user", { cookie });
+      assert.ok(actor.permissions.includes("transactions.purchase_assets"));
+      for (const permission of [
+        "accounting.manage",
+        "reports.view",
+        "masters.manage",
+        "users.manage",
+      ])
+        assert.ok(
+          !actor.permissions.includes(permission),
+          `${permission} remains outside own-data access`,
+        );
+      const ownSetup = await ok(`${prefix}/bootstrap`, { cookie });
+      assert.ok(ownSetup.accounts.some((a: any) => a.id === cash.id));
+      assert.ok(
+        ownSetup.accounts.every(
+          (a: any) =>
+            a.id === cash.id || (a.type === "expense" && !a.restricted),
+        ),
+      );
+      assert.ok(
+        !ownSetup.accounts.some((a: any) =>
+          [fixedAsset.id, bankAccount.id, otherCash.id, payroll.id].includes(
+            a.id,
+          ),
+        ),
+      );
+      assert.doesNotMatch(JSON.stringify(ownSetup), /CONFIDENTIAL/);
+      const purchase = await create();
+      assert.equal(purchase.status, "pending");
+      assert.equal(
+        purchase.head_id,
+        null,
+        "The business action chooses its asset account internally",
+      );
+      await ok(`${prefix}/documents/${purchase.id}`, {
+        method: "PATCH",
+        cookie,
+        body: { ...input, reference: "ASSET-RECEIPT-1" },
+      });
+      const receipt = new FormData();
+      receipt.append(
+        "files",
+        new Blob(["%PDF-1.4\n%%EOF"], { type: "application/pdf" }),
+        "workstation-receipt.pdf",
+      );
+      await ok(`${prefix}/documents/${purchase.id}/attachments`, {
+        method: "POST",
+        cookie,
+        body: receipt,
+      });
+      const attachments = await ok(
+        `${prefix}/documents/${purchase.id}/attachments`,
+        { cookie },
+      );
+      assert.equal(attachments.length, 1);
+      assert.equal(
+        (
+          await request(
+            `${prefix}/documents/${purchase.id}/attachments/${attachments[0].id}`,
+            { cookie },
+          )
+        ).response.status,
+        200,
+      );
+      for (const changes of [
+        { sourceId: bankAccount.id },
+        { sourceId: otherCash.id },
+        { sourceId: null },
+        { headId: fixedAsset.id },
+        { headId: office.id },
+        { headId: payroll.id },
+        { targetId: cash.id },
+        { categoryId: ownSetup.categories[0].id },
+        { relatedId: purchase.id },
+        { otherCompanyId: otherCompany },
+        { contactId: colleague.id },
+        { assetName: "Old asset module" },
+      ]) {
+        await denied(`${prefix}/documents`, {
+          method: "POST",
+          body: { ...input, ...changes },
+        });
+        await denied(`${prefix}/documents/${purchase.id}`, {
+          method: "PATCH",
+          body: { ...input, ...changes },
+        });
+      }
+      await denied(`${prefix}/documents`, {
+        method: "POST",
+        body: { ...input, kind: "adjustment", targetId: fixedAsset.id },
+      });
+      for (const path of [
+        `${prefix}/reports`,
+        "/api/admin",
+        `${prefix}/accounts`,
+      ])
+        await denied(path);
+      await denied(
+        `${prefix}/documents/${purchase.id}/post`,
+        { method: "POST", body: {} },
+        [403],
+      );
+      await setAccess(true, true);
+      const posted = await ok(`${prefix}/documents/${purchase.id}/post`, {
+        method: "POST",
+        cookie,
+        body: {},
+      });
+      assert.equal(posted.status, "posted");
+      const lines = (
+        await control.query(
+          `SELECT l.account_id,l.debit,l.credit FROM ${schema}.journal_lines l JOIN ${schema}.journals j ON j.id=l.journal_id WHERE j.document_id=$1 ORDER BY l.account_id`,
+          [purchase.id],
+        )
+      ).rows;
+      assert.deepEqual(lines, [
+        { account_id: fixedAsset.id, debit: "1000.00", credit: "0.00" },
+        { account_id: cash.id, debit: "0.00", credit: "1000.00" },
+      ]);
+      const ownBalances = await ok(`${prefix}/my-cash`, { cookie });
+      assert.equal(
+        ownBalances.find((a: any) => a.id === cash.id).balance,
+        "9000.00",
+      );
+      const report = await ok(
+        `${prefix}/reports?from=2026-10-01&to=2026-10-31`,
+      );
+      assert.equal(report.summary.expenses, "0.00");
+      assert.equal(report.summary.profit, "0.00");
+      assert.equal(
+        report.cashFlow.find((row: any) => row.id === "Investing").balance,
+        "-1000.00",
+      );
+      assert.equal(
+        Number(
+          (
+            await control.query(
+              `SELECT count(*) FROM ${schema}.assets WHERE company_id=$1`,
+              [fixtureCompany.id],
+            )
+          ).rows[0].count,
+        ),
+        0,
+      );
+      const ledger = await ok(`${prefix}/documents/${purchase.id}/ledger`, {
+        cookie,
+      });
+      assert.equal(ledger.journals.length, 1);
+      assert.equal(ledger.journals[0].lines.length, 2);
+      const assetLine = ledger.journals[0].lines.find(
+        (line: any) => line.debit === "1000.00",
+      );
+      assert.equal(assetLine.account_id, null);
+      assert.equal(assetLine.account_code, null);
+      assert.equal(assetLine.account_name, "Fixed assets");
+      assert.equal(
+        ledger.journals[0].lines.find(
+          (line: any) => line.account_id === cash.id,
+        ).credit,
+        "1000.00",
+      );
+      assert.doesNotMatch(
+        JSON.stringify(ledger),
+        /CONFIDENTIAL|CAPITAL-BANK|CAPITAL-OTHER|contact_id|company_id/,
+      );
+      const peerPurchase = await master("documents", {
+        ...input,
+        sourceId: otherCash.id,
+        description: "CONFIDENTIAL PEER PURCHASE",
+      });
+      const listed = await ok(`${prefix}/documents`, { cookie });
+      assert.ok(
+        listed.some(
+          (d: any) => d.id === purchase.id && !d.retired && d.can_manage,
+        ),
+      );
+      assert.ok(!listed.some((d: any) => d.id === peerPurchase.id));
+      assert.doesNotMatch(JSON.stringify(listed), /CONFIDENTIAL/);
+      await denied(`${prefix}/documents/${peerPurchase.id}/ledger`);
+      await denied(`${prefix}/documents/${peerPurchase.id}/attachments`);
+
+      const pending = await create({ amount: "100" });
+      const cancellable = await create({ amount: "100" });
+      await setAccess(false, true);
+      const revoked = await ok("/api/auth/user", { cookie });
+      assert.ok(!revoked.permissions.includes("transactions.purchase_assets"));
+      const retained = await ok(`${prefix}/documents`, { cookie });
+      assert.ok(retained.some((d: any) => d.id === purchase.id));
+      assert.ok(retained.some((d: any) => d.id === pending.id));
+      await denied(
+        `${prefix}/documents`,
+        { method: "POST", body: input },
+        [403],
+      );
+      await denied(
+        `${prefix}/documents/${pending.id}`,
+        {
+          method: "PATCH",
+          body: { ...input, kind: "expense", headId: office.id },
+        },
+        [403],
+      );
+      await denied(
+        `${prefix}/documents/${pending.id}/post`,
+        { method: "POST", body: {} },
+        [403],
+      );
+      await denied(
+        `${prefix}/documents/${purchase.id}/reverse`,
+        { method: "POST", body: { date: "2026-10-03" } },
+        [403],
+      );
+      const bulkDenied = await ok(`${prefix}/documents/bulk-post`, {
+        method: "POST",
+        cookie,
+        body: { ids: [pending.id] },
+      });
+      assert.equal(bulkDenied.failed, 1);
+      assert.equal(bulkDenied.posted, 0);
+      await ok(`${prefix}/documents/${cancellable.id}/cancel`, {
+        method: "POST",
+        cookie,
+        body: {},
+      });
+      await setAccess(true, true);
+      const bulkPosted = await ok(`${prefix}/documents/bulk-post`, {
+        method: "POST",
+        cookie,
+        body: { ids: [pending.id] },
+      });
+      assert.equal(bulkPosted.posted, 1);
+      await ok(`${prefix}/documents/${pending.id}/reverse`, {
+        method: "POST",
+        cookie,
+        body: { date: "2026-10-03" },
+      });
+      const reassigned = await create({ amount: "100" });
+      await setAccess(true, true, []);
+      await denied(
+        `${prefix}/documents/${reassigned.id}/post`,
+        { method: "POST", body: {} },
+        [403],
+      );
+      await denied(`${prefix}/documents/${purchase.id}/ledger`, {}, [403]);
+      assert.ok(
+        !(await ok(`${prefix}/documents`, { cookie })).some((d: any) =>
+          [purchase.id, reassigned.id].includes(d.id),
+        ),
+        "Removing the cash assignment removes access even to self-created capital purchases",
+      );
+      assert.equal(
+        (
+          await control.query(
+            `SELECT status FROM ${schema}.documents WHERE id=$1`,
+            [reassigned.id],
+          )
+        ).rows[0].status,
+        "pending",
+      );
+    });
+
     test("explicit own-data scope restricts financial data and actions even with broad permissions", async () => {
       const ownCompany = await ok("/api/companies", {
         method: "POST",

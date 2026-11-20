@@ -2164,12 +2164,24 @@ input[role="switch"]:checked:before {
   margin-top: 4px;
 }
 .permission-row > .searchable-select {
-  width: 135px;
+  width: 190px;
+  flex-shrink: 0;
 }
 .permission-row .searchable-select-input {
   min-height: 33px;
   font-size: 11px;
   padding: 5px 30px 5px 8px;
+}
+@media (max-width: 480px) {
+  .permission-row {
+    flex-wrap: wrap;
+  }
+  .permission-row > span {
+    flex: 1 1 100%;
+  }
+  .permission-row > .searchable-select {
+    width: 100%;
+  }
 }
 .card > .modal-footer {
   padding: 20px 23px;

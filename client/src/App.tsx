@@ -46,6 +46,7 @@ import { SearchableSelect } from "./SearchableSelect";
 import { SortHeader } from "./SortHeader";
 import { nextSort, sortRows, type SortState, type SortType } from "./tableSort";
 import Decimal from "decimal.js";
+import { permissionDetails } from "../../shared/permissions";
 
 type Row = Record<string, any>;
 type User = {
@@ -102,6 +103,7 @@ const kindLabels: Record<string, string> = {
   transfer: "Transfer money",
   withdrawal: "Withdraw cash",
   expense: "Record expense",
+  capital_purchase: "Record asset purchase",
   bill: "Record vendor bill",
   invoice: "Create client invoice",
   client_payment: "Receive client payment",
@@ -442,6 +444,36 @@ export default function App() {
     void initial();
   }, [initial]);
   useEffect(() => {
+    if (!user || refresh === 0) return;
+    let active = true;
+    api("/api/auth/user")
+      .then((actor) => {
+        if (active)
+          setUser((current) => (current?.id === actor.id ? actor : current));
+      })
+      .catch((e) => {
+        if (!active) return;
+        if (e.status === 401) setUser(null);
+        setError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [refresh, user?.id]);
+  const accessKey = JSON.stringify([
+    user?.id,
+    user?.role,
+    user?.dataScope,
+    [...(user?.permissions || [])].sort(),
+  ]);
+  useEffect(() => {
+    setData(emptyData);
+    setDocuments([]);
+    setReport(null);
+    setModal(null);
+    setSelected(null);
+  }, [accessKey]);
+  useEffect(() => {
     if (ownData && !["transactions", "accounts"].includes(page)) {
       setPage("transactions");
       setModal(null);
@@ -587,6 +619,14 @@ export default function App() {
       ),
     }))
     .filter((group) => group.items.length > 0);
+  useEffect(() => {
+    if (!user) return;
+    const available = nav
+      .flatMap((group) => group.items)
+      .filter(([, , , permission]) => can(permission as string));
+    if (!available.some(([key]) => key === page))
+      setPage((available[0]?.[0] as string) || "transactions");
+  }, [accessKey, page]);
   const pageTitles: Record<string, [string, string]> = {
     dashboard: [
       "Financial overview",
@@ -2593,6 +2633,7 @@ function TransactionModal({
       "transfer",
       "withdrawal",
       "expense",
+      "capital_purchase",
       "vendor_payment",
       "intercompany",
       "adjustment",
@@ -2612,7 +2653,7 @@ function TransactionModal({
     category = ["expense", "bill"].includes(k);
   const contactKind = ["invoice", "client_payment"].includes(k)
     ? "customer"
-    : ["bill", "vendor_payment"].includes(k)
+    : ["bill", "vendor_payment", "capital_purchase"].includes(k)
       ? "vendor"
       : null;
   const cash = data.accounts.filter(
@@ -2655,8 +2696,11 @@ function TransactionModal({
   const options = activeKindLabels.filter(
     ([key]) =>
       (ownData
-        ? ["expense", "transfer"].includes(key)
-        : user.role !== "employee" || key === "expense") &&
+        ? ["expense", "transfer", "capital_purchase"].includes(key)
+        : user.role !== "employee" ||
+          ["expense", "capital_purchase"].includes(key)) &&
+      (key !== "capital_purchase" ||
+        user.permissions.includes("transactions.purchase_assets")) &&
       (!["opening", "adjustment"].includes(key) ||
         user.permissions.includes("accounting.manage")),
   );
@@ -2725,6 +2769,17 @@ function TransactionModal({
             options={options.map(([value, label]) => ({ value, label }))}
           />
         </Field>
+        {k === "capital_purchase" && (
+          <div className="info wide">
+            <Landmark size={18} />
+            <span>
+              Record an asset already paid for
+              {ownData ? " from your assigned cash" : ""}. The amount will be
+              added to company assets. Asset tracking and depreciation are
+              managed separately.
+            </span>
+          </div>
+        )}
         {(source || target) &&
           !cash.length &&
           !["opening", "adjustment"].includes(k) && (
@@ -2825,7 +2880,11 @@ function TransactionModal({
         {source && (
           <Field
             label={
-              k === "adjustment" ? "Credit account" : "Paid / transferred from"
+              k === "adjustment"
+                ? "Credit account"
+                : k === "capital_purchase"
+                  ? "Paid from"
+                  : "Paid / transferred from"
             }
           >
             <Select
@@ -3012,10 +3071,18 @@ function TransactionModal({
             />
           </Field>
         )}
-        <Field label={contactKind ? title(contactKind) : "Contact (optional)"}>
+        <Field
+          label={
+            k === "capital_purchase"
+              ? "Vendor (optional)"
+              : contactKind
+                ? title(contactKind)
+                : "Contact (optional)"
+          }
+        >
           <Select
             value={form.contactId}
-            required={!!contactKind}
+            required={!!contactKind && k !== "capital_purchase"}
             options={data.contacts.filter(
               (c) =>
                 c.active &&
@@ -3034,13 +3101,24 @@ function TransactionModal({
             />
           </Field>
         )}
-        <Field label="Description / notes" wide>
+        <Field
+          label={
+            k === "capital_purchase"
+              ? "Asset purchased / description"
+              : "Description / notes"
+          }
+          wide
+        >
           <textarea
             value={form.description}
             onChange={(e) => set("description", e.target.value)}
             required
             rows={3}
-            placeholder="What is this transaction for?"
+            placeholder={
+              k === "capital_purchase"
+                ? "e.g. Workstation for the design team"
+                : "What is this transaction for?"
+            }
           />
         </Field>
         <div className="transaction-attachments wide">
@@ -3167,6 +3245,8 @@ function DocumentDetail({
     }
   };
   const canActOnDocument = user.dataScope !== "own" || doc.can_manage === true;
+  const canPurchase =
+    doc.kind !== "capital_purchase" || can("transactions.purchase_assets");
   const retired =
     retiredKinds.has(doc.kind) ||
     doc.retired === true ||
@@ -3277,7 +3357,12 @@ function DocumentDetail({
           ...(!doc.inbound
             ? [
                 ["Category", categoryParts.join(" / ") || "—"],
-                ["Selected account head", accountLabel(doc.head_id)],
+                [
+                  "Selected account head",
+                  doc.kind === "capital_purchase"
+                    ? "Fixed assets (automatic)"
+                    : accountLabel(doc.head_id),
+                ],
                 ["Cash custodian", [...new Set(custodians)].join(", ") || "—"],
                 [
                   "Related transaction",
@@ -3313,39 +3398,42 @@ function DocumentDetail({
               <Paperclip size={17} />
               Receipts & documents
             </h3>
-            {!retired && canManageSubmission && can("transactions.create") && (
-              <label className="button secondary compact upload-label">
-                <Plus size={15} />
-                Attach files
-                <input
-                  type="file"
-                  multiple
-                  accept="application/pdf,image/png,image/jpeg,image/webp"
-                  disabled={busy}
-                  onChange={async (e) => {
-                    const files = e.target.files;
-                    if (!files?.length) return;
-                    const body = new FormData();
-                    Array.from(files).forEach((f) => body.append("files", f));
-                    setBusy(true);
-                    setError("");
-                    try {
-                      await api(
-                        `${base}/documents/${doc.id}/attachments`,
-                        "POST",
-                        body,
-                      );
-                      await load();
-                    } catch (e) {
-                      setError((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                      e.target.value = "";
-                    }
-                  }}
-                />
-              </label>
-            )}
+            {!retired &&
+              canManageSubmission &&
+              canPurchase &&
+              can("transactions.create") && (
+                <label className="button secondary compact upload-label">
+                  <Plus size={15} />
+                  Attach files
+                  <input
+                    type="file"
+                    multiple
+                    accept="application/pdf,image/png,image/jpeg,image/webp"
+                    disabled={busy}
+                    onChange={async (e) => {
+                      const files = e.target.files;
+                      if (!files?.length) return;
+                      const body = new FormData();
+                      Array.from(files).forEach((f) => body.append("files", f));
+                      setBusy(true);
+                      setError("");
+                      try {
+                        await api(
+                          `${base}/documents/${doc.id}/attachments`,
+                          "POST",
+                          body,
+                        );
+                        await load();
+                      } catch (e) {
+                        setError((e as Error).message);
+                      } finally {
+                        setBusy(false);
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                </label>
+              )}
           </div>
           {attachments.length ? (
             <div className="attachment-list">
@@ -3415,6 +3503,7 @@ function DocumentDetail({
           <>
             {canManageSubmission &&
               can("transactions.create") &&
+              canPurchase &&
               !retired &&
               doc.status === "pending" && (
                 <button
@@ -3438,6 +3527,7 @@ function DocumentDetail({
               )}
             {canActOnDocument &&
               can("transactions.post") &&
+              canPurchase &&
               !retired &&
               doc.status === "pending" && (
                 <button
@@ -3450,6 +3540,7 @@ function DocumentDetail({
               )}
             {canActOnDocument &&
               can("transactions.reverse") &&
+              canPurchase &&
               doc.status === "posted" &&
               !reversing && (
                 <button
@@ -4308,6 +4399,13 @@ function AccessModal({
       .map(({ company_id, contact_id }: Row) => ({ company_id, contact_id })),
   });
   const set = (key: string, v: any) => setForm((f) => ({ ...f, [key]: v }));
+  const selectedRole = admin.roles.find(
+    (role: Row) => role.id === form.role_id,
+  );
+  const ownDataOnly =
+    isUser &&
+    (form.data_scope === "own" ||
+      (!form.data_scope && selectedRole?.name === "employee"));
   return (
     <Modal
       title={`${item.id ? "Manage" : "Add"} ${isUser ? "user" : "role"}`}
@@ -4519,52 +4617,77 @@ function AccessModal({
               ? "Inherit the role’s permission, or explicitly enable or disable it for this user."
               : "Select the actions available to users assigned this role."}
           </p>
-          {admin.permissions.map((p: string) => (
-            <div className="permission-row" key={p}>
-              <span>
-                {title(p.split(".")[0])}
-                <small>{title(p.split(".")[1])}</small>
-              </span>
-              {isUser ? (
-                <SearchableSelect
-                  aria-label={p}
-                  value={
-                    form.overrides[p] === undefined
-                      ? "inherit"
-                      : form.overrides[p]
-                        ? "allow"
-                        : "deny"
-                  }
-                  onChange={(value) => {
-                    const next = { ...form.overrides };
-                    if (value === "inherit") delete next[p];
-                    else next[p] = value === "allow";
-                    set("overrides", next);
-                  }}
-                  options={[
-                    { value: "inherit", label: "Inherit role" },
-                    { value: "allow", label: "Enabled" },
-                    { value: "deny", label: "Disabled" },
-                  ]}
-                />
-              ) : (
-                <input
-                  aria-label={p}
-                  type="checkbox"
-                  role="switch"
-                  checked={form.permissions.includes(p)}
-                  onChange={(e) =>
-                    set(
-                      "permissions",
-                      e.target.checked
-                        ? [...form.permissions, p]
-                        : form.permissions.filter((s: string) => s !== p),
-                    )
-                  }
-                />
-              )}
-            </div>
-          ))}
+          {ownDataOnly && (
+            <p className="info-note">
+              Own data only limits this user to their transactions and assigned
+              cash. Accounting adjustments and other company-wide permissions do
+              not apply in this mode. Company-wide access is controlled by Data
+              visibility above.
+            </p>
+          )}
+          {admin.permissions.map((p: string) => {
+            const details =
+              permissionDetails[p as keyof typeof permissionDetails];
+            const inherited = !!selectedRole?.permissions.includes(p);
+            const blocked = ownDataOnly && !p.startsWith("transactions.");
+            const enabled = !blocked && (form.overrides[p] ?? inherited);
+            return (
+              <div className="permission-row" key={p}>
+                <span>
+                  {details?.label || title(p.replace(".", " "))}
+                  <small>{details?.description}</small>
+                  {isUser && (
+                    <small>
+                      {blocked
+                        ? "Unavailable with Own data only"
+                        : `Effective access: ${enabled ? "Enabled" : "Disabled"}`}
+                    </small>
+                  )}
+                </span>
+                {isUser ? (
+                  <SearchableSelect
+                    aria-label={p}
+                    value={
+                      form.overrides[p] === undefined
+                        ? "inherit"
+                        : form.overrides[p]
+                          ? "allow"
+                          : "deny"
+                    }
+                    onChange={(value) => {
+                      const next = { ...form.overrides };
+                      if (value === "inherit") delete next[p];
+                      else next[p] = value === "allow";
+                      set("overrides", next);
+                    }}
+                    options={[
+                      {
+                        value: "inherit",
+                        label: `Inherit role (${inherited ? "enabled" : "disabled"})`,
+                      },
+                      { value: "allow", label: "Enabled" },
+                      { value: "deny", label: "Disabled" },
+                    ]}
+                  />
+                ) : (
+                  <input
+                    aria-label={p}
+                    type="checkbox"
+                    role="switch"
+                    checked={form.permissions.includes(p)}
+                    onChange={(e) =>
+                      set(
+                        "permissions",
+                        e.target.checked
+                          ? [...form.permissions, p]
+                          : form.permissions.filter((s: string) => s !== p),
+                      )
+                    }
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
       </FormShell>
     </Modal>

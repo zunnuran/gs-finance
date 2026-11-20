@@ -96,7 +96,7 @@ export async function reports(
         cash_class =
           l.origin_company_id === company ? "Investing" : "Financing";
       else if (
-        l.kind === "asset_purchase" ||
+        ["asset_purchase", "capital_purchase"].includes(l.kind) ||
         l.related_kind === "asset_purchase" ||
         l.related_asset ||
         counterparts.some((x) => x.purpose === "fixed_asset")

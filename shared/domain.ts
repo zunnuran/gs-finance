@@ -4,6 +4,7 @@ export const kinds = [
   "transfer",
   "withdrawal",
   "expense",
+  "capital_purchase",
   "bill",
   "invoice",
   "client_payment",

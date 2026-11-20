@@ -356,6 +356,90 @@ test("cash custody, transfers and expenses preserve double entry without recogni
   );
 });
 
+test("paid capital purchases capitalize cash spending, reject overspending and preserve history on reversal without asset-register records", async () => {
+  const f = await fixture("Ledger-only asset purchases");
+  await f.post({ kind: "opening", amount: "5000", targetId: f.cash });
+  const overdrawn = await f.draft({
+    kind: "capital_purchase",
+    amount: "6000",
+    sourceId: f.cash,
+  });
+  await assert.rejects(
+    () => tx((c) => postDocument(c, f.company.id, userId, overdrawn.id)),
+    /insufficient|available|balance/i,
+  );
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM journals WHERE document_id=$1",
+        [overdrawn.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  await f.expectBalance(f.cash, "5000");
+  await f.expectBalance(f.system.fixed_asset, "0");
+
+  const altered = await f.draft({ kind: "capital_purchase", sourceId: f.cash });
+  await connection.query("UPDATE documents SET head_id=$1 WHERE id=$2", [
+    f.system.office,
+    altered.id,
+  ]);
+  await assert.rejects(
+    () => tx((c) => postDocument(c, f.company.id, userId, altered.id)),
+    /Asset purchases use only/i,
+    "Posting revalidates stored records instead of trusting creation-time input validation",
+  );
+  const purchase = await f.post({
+    kind: "capital_purchase",
+    amount: "1200",
+    sourceId: f.cash,
+    contactId: f.vendor,
+    description: "Workstation paid from custodian cash",
+  });
+  await f.expectBalance(f.cash, "3800");
+  await f.expectBalance(f.system.fixed_asset, "1200");
+  const report = await reports(
+    connection,
+    f.company.id,
+    "2026-10-01",
+    "2026-10-31",
+  );
+  assert.equal(report.summary.expenses, "0.00");
+  assert.equal(report.summary.profit, "0.00");
+  assert.equal(
+    report.cashFlow.find((row: any) => row.id === "Investing")?.balance,
+    "-1200.00",
+  );
+  assert.equal(
+    (
+      await connection.query(
+        "SELECT count(*)::int n FROM assets WHERE company_id=$1",
+        [f.company.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  await tx((c) =>
+    reverseDocument(c, f.company.id, userId, purchase.id, "2026-10-11"),
+  );
+  await f.expectBalance(f.cash, "5000");
+  await f.expectBalance(f.system.fixed_asset, "0");
+  const journals = (
+    await connection.query(
+      "SELECT j.id,j.reversal_of,sum(l.debit)::text debit,sum(l.credit)::text credit FROM journals j JOIN journal_lines l ON l.journal_id=j.id WHERE j.document_id=$1 GROUP BY j.id ORDER BY j.id",
+      [purchase.id],
+    )
+  ).rows;
+  assert.equal(journals.length, 2);
+  assert.equal(journals[1].reversal_of, journals[0].id);
+  assert.ok(
+    journals.every(
+      (journal) => journal.debit === "1200.00" && journal.credit === "1200.00",
+    ),
+  );
+});
+
 test("retired advance and asset actions cannot create new documents or post retained pending records", async () => {
   const f = await fixture("Retired modules");
   const before = (

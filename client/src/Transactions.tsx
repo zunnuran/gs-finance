@@ -360,10 +360,15 @@ export function Transactions({
     if (user.dataScope !== "own") return true;
     if (
       row.can_manage !== true ||
-      !["expense", "transfer"].includes(row.kind) ||
+      !["expense", "transfer", "capital_purchase"].includes(row.kind) ||
       row.other_company_id ||
       row.related_id ||
       account(row.source_id)?.purpose !== "cash"
+    )
+      return false;
+    if (
+      row.kind === "capital_purchase" &&
+      (row.head_id || row.category_id || row.target_id)
     )
       return false;
     if (
@@ -384,6 +389,7 @@ export function Transactions({
     !row.retired &&
     !RETIRED_KINDS.has(row.kind) &&
     withinOwnScope(row) &&
+    (row.kind !== "capital_purchase" || can("transactions.purchase_assets")) &&
     (!row.other_company_id ||
       companies.some((c) => c.id === row.other_company_id)) &&
     (!["opening", "adjustment"].includes(row.kind) ||
