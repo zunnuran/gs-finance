@@ -121,7 +121,7 @@ export function Transactions({
   rows: Row[];
   query: string;
   setQuery: (value: string) => void;
-  onSelect: (row: Row) => void;
+  onSelect: (row: Row, orderedRows: Row[]) => void;
   can: (permission: string) => boolean;
   data: Data;
   companies: Row[];
@@ -739,7 +739,7 @@ export function Transactions({
                         className="text-button"
                         onClick={() => {
                           const row = rows.find((d) => d.id === r.id);
-                          if (row) onSelect(row);
+                          if (row) onSelect(row, filtered);
                         }}
                       >
                         #{String(r.id).padStart(5, "0")}
@@ -864,7 +864,7 @@ export function Transactions({
                             type="button"
                             className="transaction-description-button"
                             disabled={busy}
-                            onClick={() => onSelect(row)}
+                            onClick={() => onSelect(row, filtered)}
                             title={c.value(row)}
                           >
                             {c.value(row).split("\n")[0]}
@@ -893,7 +893,7 @@ export function Transactions({
                       className="icon-button"
                       aria-label={`Open ${row.activity_type === "reversal" ? "reversal of " : ""}transaction #${String(row.id).padStart(5, "0")}`}
                       disabled={busy}
-                      onClick={() => onSelect(row)}
+                      onClick={() => onSelect(row, filtered)}
                     >
                       <ChevronRight size={17} />
                     </button>

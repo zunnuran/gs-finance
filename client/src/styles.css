@@ -1695,6 +1695,19 @@ tr.clickable:hover {
 .modal-heading .icon-button {
   margin-right: -6px;
 }
+.transaction-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.transaction-navigation > span {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .form-stack {
   display: flex;
   flex-direction: column;

@@ -13,6 +13,7 @@ import {
   Building2,
   ChartNoAxesCombined,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleHelp,
   CreditCard,
@@ -407,6 +408,7 @@ export default function App() {
     [to, setTo] = useState(today()),
     [modal, setModal] = useState<Row | null>(null),
     [selected, setSelected] = useState<Row | null>(null),
+    [selectionOrder, setSelectionOrder] = useState<number[]>([]),
     [masterRevision, setMasterRevision] = useState(0),
     [refresh, setRefresh] = useState(0);
   const can = (p: string) => !!user?.permissions.includes(p);
@@ -483,6 +485,9 @@ export default function App() {
     user?.dataScope,
     [...(user?.permissions || [])].sort(),
   ]);
+  useEffect(() => {
+    setSelectionOrder([]);
+  }, [accessKey, company, periodKey, page]);
   useEffect(() => {
     setData(emptyData);
     setDocuments([]);
@@ -735,7 +740,7 @@ export default function App() {
         report.period?.mode === selectedPeriod.mode))
       ? report
       : null;
-  const selectDocument = (row: Row) => {
+  const selectDocument = (row: Row, orderedRows: Row[] = [row]) => {
     const current = documents.find((document) => document.id === row.id);
     if (!current) {
       setError(
@@ -743,7 +748,26 @@ export default function App() {
       );
       return;
     }
+    const availableIds = new Set(documents.map((document) => document.id));
+    // Original and reversal activity can point to the same transaction.
+    // Visit each document once, keeping the visible table's order.
+    setSelectionOrder(
+      [...new Set(orderedRows.map((document) => document.id))].filter((id) =>
+        availableIds.has(id),
+      ),
+    );
     setSelected(current);
+  };
+  const navigationDocuments = selectionOrder
+    .map((id) => documents.find((document) => document.id === id))
+    .filter((document): document is Row => !!document);
+  const navigationIndex = navigationDocuments.findIndex(
+    (document) => document.id === selected?.id,
+  );
+  const navigateDocument = (direction: -1 | 1) => {
+    if (loading || navigationIndex < 0) return;
+    const next = navigationDocuments[navigationIndex + direction];
+    if (next) setSelected(next);
   };
   const totalPending = displayedDocuments.filter(
     (d) => d.status === "pending" && d.activity_type !== "reversal",
@@ -1217,6 +1241,7 @@ export default function App() {
             }
             closeModal();
             reload();
+            setSelectionOrder([]);
             setSelected(doc);
             notify(
               `Transaction saved as pending${period && (doc.date < period.from || doc.date > period.to) ? ` · Its date is outside ${period.label}; switch periods to see it in the list.` : ""}`,
@@ -1226,7 +1251,22 @@ export default function App() {
       )}
       {selected && (
         <DocumentDetail
+          key={`${base}/${selected.id}`}
           doc={documents.find((d) => d.id === selected.id) || selected}
+          navigation={{
+            position: navigationIndex < 0 ? 1 : navigationIndex + 1,
+            total: navigationIndex < 0 ? 1 : navigationDocuments.length,
+            previous:
+              !loading && navigationIndex > 0
+                ? () => navigateDocument(-1)
+                : undefined,
+            next:
+              !loading &&
+              navigationIndex >= 0 &&
+              navigationIndex < navigationDocuments.length - 1
+                ? () => navigateDocument(1)
+                : undefined,
+          }}
           period={period || undefined}
           data={data}
           base={base}
@@ -1493,7 +1533,7 @@ function Dashboard({
   data: Data;
   can: (p: string) => boolean;
   openTransaction: (k?: string) => void;
-  onSelect: (d: Row) => void;
+  onSelect: (d: Row, orderedRows: Row[]) => void;
   onPage: (s: string) => void;
   from: string;
   to: string;
@@ -1821,7 +1861,7 @@ function TransactionTable({
   onSelect,
 }: {
   rows: Row[];
-  onSelect: (d: Row) => void;
+  onSelect: (d: Row, orderedRows: Row[]) => void;
 }) {
   const [sort, setSort] = useState<SortState | null>(null);
   const columns = [
@@ -1862,7 +1902,7 @@ function TransactionTable({
           {sortedRows.map((d) => (
             <tr
               key={d.activity_id || d.id}
-              onClick={() => onSelect(d)}
+              onClick={() => onSelect(d, sortedRows)}
               className="clickable"
             >
               <td>
@@ -2552,7 +2592,7 @@ function PeoplePage({
   can: (s: string) => boolean;
   onEdit: (r: Row) => void;
   onNew: (k?: string, p?: Row) => void;
-  onSelect: (d: Row) => void;
+  onSelect: (d: Row, orderedRows: Row[]) => void;
 }) {
   const [tab, setTab] = useState("open");
   const [peopleSort, setPeopleSort] = useState<SortState | null>(null);
@@ -2867,7 +2907,7 @@ function PeoplePage({
                   <tr
                     key={d.id}
                     className="clickable"
-                    onClick={() => onSelect(d)}
+                    onClick={() => onSelect(d, sortedOutstanding)}
                   >
                     <td>
                       <strong>{d.description}</strong>
@@ -3555,6 +3595,7 @@ function TransactionModal({
 
 function DocumentDetail({
   doc,
+  navigation,
   period,
   data,
   base,
@@ -3566,6 +3607,12 @@ function DocumentDetail({
   onSettle,
 }: {
   doc: Row;
+  navigation: {
+    position: number;
+    total: number;
+    previous?: () => void;
+    next?: () => void;
+  };
   period?: ResolvedPeriod;
   data: Data;
   base: string;
@@ -3586,8 +3633,20 @@ function DocumentDetail({
       .then(setAttachments)
       .catch((e) => setError(e.message));
   useEffect(() => {
-    if (!doc.inbound) void load();
-  }, [doc.id]);
+    let active = true;
+    setAttachments([]);
+    if (!doc.inbound)
+      api(`${base}/documents/${doc.id}/attachments`)
+        .then((rows) => {
+          if (active) setAttachments(rows);
+        })
+        .catch((e) => {
+          if (active) setError(e.message);
+        });
+    return () => {
+      active = false;
+    };
+  }, [base, doc.id, doc.inbound]);
   const action = async (a: string, b?: Row) => {
     setBusy(true);
     setError("");
@@ -3663,8 +3722,35 @@ function DocumentDetail({
       title={`Transaction #${String(doc.id).padStart(5, "0")}`}
       description={kindLabels[doc.kind]}
       onClose={onClose}
+      busy={busy}
       wide
     >
+      <nav
+        className="transaction-navigation"
+        aria-label="Transaction navigation"
+      >
+        <button
+          type="button"
+          className="button secondary compact"
+          aria-label="Previous transaction"
+          disabled={busy || !navigation.previous}
+          onClick={navigation.previous}
+        >
+          <ChevronLeft size={16} /> Previous
+        </button>
+        <span role="status">
+          {navigation.position} of {navigation.total}
+        </span>
+        <button
+          type="button"
+          className="button secondary compact"
+          aria-label="Next transaction"
+          disabled={busy || !navigation.next}
+          onClick={navigation.next}
+        >
+          Next <ChevronRight size={16} />
+        </button>
+      </nav>
       <div className="document-banner">
         <div>
           <span>
@@ -3860,7 +3946,7 @@ function DocumentDetail({
         </div>
       )}
       <div className="modal-footer wrap">
-        <button className="button secondary" onClick={onClose}>
+        <button className="button secondary" onClick={onClose} disabled={busy}>
           Close
         </button>
         {!doc.inbound && (
