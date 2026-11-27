@@ -24,6 +24,7 @@ import {
   value,
 } from "./accounting";
 import { reports } from "./reports";
+import { withDocumentAccounts } from "./documentAccounts";
 import { permissionKeys } from "../shared/permissions";
 import {
   pakistanToday,
@@ -486,19 +487,24 @@ export function registerRoutes(app: Express) {
             [company, req.actor.id],
           )
         ).rows;
-        res.json(docs.map((d) => redactOwnDocument(d, req.actor, context)));
+        const enriched = await withDocumentAccounts(
+          pool,
+          company,
+          docs,
+          [...context.cash, ...context.expenses].map((account) => account.id),
+        );
+        res.json(enriched.map((d) => redactOwnDocument(d, req.actor, context)));
         return;
       }
-      res.json(
-        (
-          await pool.query(
-            `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,
+      const docs = (
+        await pool.query(
+          `SELECT d.*,${retiredDocumentSql} retired,d.company_id<>$1 inbound,ct.name contact_name,p.name project_name,u.full_name creator,
             CASE WHEN d.company_id=$1 THEN (SELECT count(*)::integer FROM attachments attachment WHERE attachment.document_id=d.id) ELSE 0 END attachment_count,
             COALESCE((SELECT sum(a.amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated,COALESCE((SELECT sum(a.base_amount) FROM allocations a JOIN documents x ON x.id=a.document_id WHERE a.related_id=d.id AND x.status='posted'),0) allocated_base FROM documents d LEFT JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN projects p ON p.id=d.project_id JOIN users u ON u.id=d.created_by WHERE (d.company_id=$1 OR (d.other_company_id=$1 AND d.status IN ('posted','reversed'))) AND ($2::integer IS NULL OR d.created_by=$2) ORDER BY d.date DESC,d.id DESC`,
-            [company, null],
-          )
-        ).rows,
-      );
+          [company, null],
+        )
+      ).rows;
+      res.json(await withDocumentAccounts(pool, company, docs));
     }),
   );
   app.get(
@@ -559,13 +565,19 @@ export function registerRoutes(app: Express) {
       }));
       if (own) {
         const context = await ownContext(pool, req.actor, company);
+        const enriched = await withDocumentAccounts(
+          pool,
+          company,
+          rows,
+          [...context.cash, ...context.expenses].map((account) => account.id),
+        );
         res.json(
-          rows.map((row) => ({
+          enriched.map((row) => ({
             ...redactOwnDocument(row, req.actor, context),
             ...(row.activity_type === "reversal" ? { can_manage: false } : {}),
           })),
         );
-      } else res.json(rows);
+      } else res.json(await withDocumentAccounts(pool, company, rows));
     }),
   );
   app.post(

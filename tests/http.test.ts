@@ -128,6 +128,16 @@ describe(
         body: {},
       });
     }
+    function assertAccountIds(row: any, expected: number[]) {
+      assert.ok(row, "The matching transaction must be returned");
+      assert.ok(Array.isArray(row.account_ids), "Every row has account_ids");
+      assert.equal(new Set(row.account_ids).size, row.account_ids.length);
+      assert.ok(row.account_ids.every((id: unknown) => Number.isInteger(id)));
+      assert.deepEqual(
+        [...row.account_ids].sort((a: number, b: number) => a - b),
+        [...new Set(expected)].sort((a, b) => a - b),
+      );
+    }
 
     before(async () => {
       control = new pg.Pool({ connectionString: databaseUrl });
@@ -940,6 +950,212 @@ describe(
       );
     });
 
+    test("transaction account filters use configured core accounts before posting and actual historical accounts afterward", async () => {
+      const fixtureCompany = await ok("/api/companies", {
+        method: "POST",
+        body: { name: "Account filter fixture" },
+      });
+      const prefix = `/api/c/${fixtureCompany.id}`;
+      const setup = await ok(`${prefix}/bootstrap`);
+      const purpose = (value: string) =>
+        setup.accounts.find((a: any) => a.purpose === value).id;
+      const create = (table: string, body: any) =>
+        ok(`${prefix}/${table}`, { method: "POST", body });
+      const pkrBank = await create("accounts", {
+        code: "FILTER-PKR",
+        name: "Filter PKR bank",
+        type: "asset",
+        purpose: "bank",
+      });
+      const usdBank = await create("accounts", {
+        code: "FILTER-USD",
+        name: "Filter USD bank",
+        type: "asset",
+        purpose: "bank",
+        currency: "USD",
+      });
+      const historicalHead = await create("accounts", {
+        code: "FILTER-EXPENSE",
+        name: "Historical expense",
+        type: "expense",
+        purpose: "general",
+      });
+      const category = await create("categories", {
+        name: "Filter category",
+        account_id: historicalHead.id,
+      });
+      const customer = await create("contacts", {
+        name: "Filter customer",
+        kind: "customer",
+      });
+      const vendor = await create("contacts", {
+        name: "Filter vendor",
+        kind: "vendor",
+      });
+      const draft = (body: any) =>
+        create("documents", {
+          date: "2026-10-03",
+          amount: "10",
+          description: "Account membership fixture",
+          ...body,
+        });
+      const postFixture = (doc: any) =>
+        ok(`${prefix}/documents/${doc.id}/post`, { method: "POST", body: {} });
+      const opening = await draft({
+        kind: "opening",
+        date: "2026-10-01",
+        amount: "1000",
+        targetId: pkrBank.id,
+      });
+      await postFixture(opening);
+      const invoice = await draft({
+        kind: "invoice",
+        amount: "100",
+        currency: "USD",
+        rate: "280",
+        contactId: customer.id,
+        headId: purpose("revenue"),
+      });
+      const payment = await draft({
+        kind: "client_payment",
+        date: "2026-10-04",
+        amount: "50",
+        currency: "USD",
+        rate: "285",
+        targetId: usdBank.id,
+        contactId: customer.id,
+        relatedId: invoice.id,
+      });
+      const bill = await draft({
+        kind: "bill",
+        contactId: vendor.id,
+        headId: purpose("software"),
+      });
+      const vendorPayment = await draft({
+        kind: "vendor_payment",
+        sourceId: pkrBank.id,
+        contactId: vendor.id,
+        relatedId: bill.id,
+      });
+      const purchase = await draft({
+        kind: "capital_purchase",
+        sourceId: pkrBank.id,
+      });
+      const expense = await draft({
+        kind: "expense",
+        sourceId: pkrBank.id,
+        categoryId: category.id,
+        headId: purpose("office"),
+      });
+      const directPayment = await draft({
+        kind: "client_payment",
+        targetId: pkrBank.id,
+        contactId: customer.id,
+        headId: purpose("other_income"),
+        categoryId: category.id,
+      });
+      const cancelled = await draft({
+        kind: "expense",
+        sourceId: pkrBank.id,
+        headId: purpose("office"),
+      });
+      await ok(`${prefix}/documents/${cancelled.id}/cancel`, {
+        method: "POST",
+        body: {},
+      });
+      const expected = [
+        [opening.id, [pkrBank.id, purpose("opening")]],
+        [invoice.id, [purpose("receivable"), purpose("revenue")]],
+        [payment.id, [usdBank.id, purpose("receivable")]],
+        [bill.id, [purpose("software"), purpose("payable")]],
+        [vendorPayment.id, [pkrBank.id, purpose("payable")]],
+        [purchase.id, [pkrBank.id, purpose("fixed_asset")]],
+        [expense.id, [pkrBank.id, historicalHead.id]],
+        [directPayment.id, [pkrBank.id, purpose("other_income")]],
+        [cancelled.id, [pkrBank.id, purpose("office")]],
+      ] as [number, number[]][];
+      for (const path of ["documents", "period-activity?period=all"]) {
+        const rows = await ok(`${prefix}/${path}`);
+        for (const [id, accounts] of expected)
+          assertAccountIds(
+            rows.find((row: any) => row.id === id),
+            accounts,
+          );
+        assert.ok(
+          !rows
+            .find((row: any) => row.id === payment.id)
+            .account_ids.includes(purpose("fx")),
+          "Pending foreign payments do not predict exchange adjustments",
+        );
+      }
+      await postFixture(invoice);
+      await postFixture(payment);
+      await postFixture(bill);
+      await postFixture(vendorPayment);
+      await postFixture(expense);
+      await postFixture(directPayment);
+      await ok(`${prefix}/categories/${category.id}`, {
+        method: "PATCH",
+        body: { name: category.name, account_id: purpose("software") },
+      });
+      await ok(`${prefix}/accounts/${historicalHead.id}`, {
+        method: "PATCH",
+        body: {
+          code: historicalHead.code,
+          name: historicalHead.name,
+          type: historicalHead.type,
+          purpose: "general",
+          active: false,
+        },
+      });
+      await ok(`${prefix}/documents/${expense.id}/reverse`, {
+        method: "POST",
+        body: { date: "2026-11-01" },
+      });
+      await ok(`${prefix}/documents/${payment.id}/reverse`, {
+        method: "POST",
+        body: { date: "2026-11-02" },
+      });
+      for (const path of ["documents", "period-activity?period=all"]) {
+        const rows = await ok(`${prefix}/${path}`);
+        for (const row of rows.filter((row: any) => row.id === expense.id))
+          assertAccountIds(row, [pkrBank.id, historicalHead.id]);
+        for (const row of rows.filter((row: any) => row.id === payment.id))
+          assertAccountIds(row, [
+            usdBank.id,
+            purpose("receivable"),
+            purpose("fx"),
+          ]);
+        assertAccountIds(
+          rows.find((row: any) => row.id === directPayment.id),
+          [pkrBank.id, purpose("other_income")],
+        );
+        assertAccountIds(
+          rows.find((row: any) => row.id === bill.id),
+          [purpose("software"), purpose("payable")],
+        );
+      }
+      const november = await ok(
+        `${prefix}/period-activity?period=month&year=2026&month=11`,
+      );
+      assert.equal(november.length, 2);
+      for (const row of november) {
+        assert.equal(row.activity_type, "reversal");
+        const journalAccounts = (
+          await control.query(
+            `SELECT DISTINCT account_id FROM ${schema}.journal_lines WHERE journal_id=$1`,
+            [row.journal_id],
+          )
+        ).rows.map((line: any) => line.account_id);
+        assertAccountIds(row, journalAccounts);
+      }
+      assert.ok(
+        (await ok(`${prefix}/bootstrap`)).accounts.some(
+          (account: any) => account.id === historicalHead.id && !account.active,
+        ),
+      );
+    });
+
     test("inter-company transaction details reveal only the current company's journal", async () => {
       const target = await ok(`/api/c/${otherCompany}/accounts`, {
         method: "POST",
@@ -1007,6 +1223,26 @@ describe(
         ),
       );
       assert.doesNotMatch(JSON.stringify(incoming), /HTTPBANK|HTTP Bank/);
+      const outgoingIds = outgoing.journals[0].lines.map(
+        (line: any) => line.account_id,
+      );
+      const incomingIds = incoming.journals[0].lines.map(
+        (line: any) => line.account_id,
+      );
+      assertAccountIds(
+        (await ok(`/api/c/${company}/documents`)).find(
+          (row: any) => row.id === document.id,
+        ),
+        outgoingIds,
+      );
+      assertAccountIds(
+        (
+          await ok(`/api/c/${otherCompany}/documents`, {
+            cookie: receiverCookie,
+          })
+        ).find((row: any) => row.id === document.id),
+        incomingIds,
+      );
       assert.equal(
         (
           await request(`/api/c/${company}/documents/${document.id}/ledger`, {
@@ -1023,6 +1259,13 @@ describe(
       assert.equal(reversed.journals.length, 2);
       assert.equal(reversed.journals[1].reversal_of, incoming.journals[0].id);
       assert.doesNotMatch(JSON.stringify(reversed), /HTTPBANK|HTTP Bank/);
+      const incomingActivity = (
+        await ok(`/api/c/${otherCompany}/period-activity?period=all`)
+      ).filter((row: any) => row.id === document.id);
+      assert.equal(incomingActivity.length, 2);
+      incomingActivity.forEach((row: any) =>
+        assertAccountIds(row, incomingIds),
+      );
     });
 
     test("uploads reach their handler and downloads retain document access checks", async () => {
@@ -1660,6 +1903,12 @@ describe(
       assert.equal(assetLine.account_id, null);
       assert.equal(assetLine.account_code, null);
       assert.equal(assetLine.account_name, "Fixed assets");
+      assertAccountIds(
+        (await ok(`${prefix}/documents`, { cookie })).find(
+          (row: any) => row.id === purchase.id,
+        ),
+        [cash.id],
+      );
       assert.equal(
         ledger.journals[0].lines.find(
           (line: any) => line.account_id === cash.id,
@@ -2026,6 +2275,17 @@ describe(
         /PRIVATE EMPLOYEE BANK|PRIVATE VENDOR BANK|PRIVATE TAX/,
       );
       const visible = await ok(`${prefix}/documents`, { cookie: ownCookie });
+      const permittedAccountIds = new Set(
+        ownSetup.accounts.map((account: any) => account.id),
+      );
+      for (const row of visible) {
+        assert.ok(Array.isArray(row.account_ids));
+        assert.ok(
+          row.account_ids.every((accountId: number) =>
+            permittedAccountIds.has(accountId),
+          ),
+        );
+      }
       for (const doc of [deposit]) {
         const found = visible.find((d: any) => d.id === doc.id);
         assert.ok(
@@ -2034,6 +2294,7 @@ describe(
         );
         assert.equal(found.can_manage, false);
         assert.ok(found.source_id == null, "A private bank source is redacted");
+        assertAccountIds(found, [cash.id]);
       }
       for (const doc of [otherDeposit, salary, income])
         assert.ok(
@@ -3835,6 +4096,11 @@ describe(
         ),
       );
       const redactedFunding = activity.find((r: any) => r.id === funding.id);
+      assertAccountIds(redactedFunding, [ownCash.id]);
+      assertAccountIds(
+        activity.find((row: any) => row.id === expense.id),
+        [ownCash.id, purpose("office")],
+      );
       assert.equal(redactedFunding.source_id, null);
       assert.equal(redactedFunding.created_by, null);
       assert.equal(redactedFunding.creator, "Finance");
@@ -3852,6 +4118,14 @@ describe(
         cookie,
       });
       const currentOwnDocuments = await ok(`${prefix}/documents`, { cookie });
+      for (const row of [...allActivity, ...currentOwnDocuments]) {
+        assert.ok(Array.isArray(row.account_ids));
+        assert.ok(
+          row.account_ids.every((accountId: number) =>
+            [ownCash.id, purpose("office")].includes(accountId),
+          ),
+        );
+      }
       assert.deepEqual(
         allActivity
           .filter((r: any) => r.activity_type === "document")

@@ -17,6 +17,12 @@ import {
 import Decimal from "decimal.js";
 import { SortHeader } from "./SortHeader";
 import { SearchableSelect } from "./SearchableSelect";
+import { AccountFilter } from "./AccountFilter";
+import {
+  filterTransactionAccounts,
+  summarizeTransactionAmounts,
+  formatTransactionAmount,
+} from "./transactionFilters";
 import {
   nextSort,
   sortRows,
@@ -146,6 +152,7 @@ export function Transactions({
   const [status, setStatus] = useState("all");
   const activityView = !!period || allData;
   const [kind, setKind] = useState("");
+  const [accountIds, setAccountIds] = useState<number[]>([]);
   const [columnQuery, setColumnQuery] = useState("");
   const [sort, setSort] = useState<SortState>({
     key: "date",
@@ -369,14 +376,24 @@ export function Transactions({
       /* Table still works without storage. */
     }
   };
+  const availableAccountIds = new Set<number>(
+    data.accounts.map((account) => account.id),
+  );
+  const selectedAccountIds = accountIds.filter((id) =>
+    availableAccountIds.has(id),
+  );
+  const accountFilterKey = selectedAccountIds.join(",");
+  const availableAccountKey = [...availableAccountIds]
+    .sort((a, b) => a - b)
+    .join(",");
+  const accountAndTypeRows = filterTransactionAccounts(
+    rows,
+    selectedAccountIds,
+  ).filter((row) => !kind || row.kind === kind);
   const filtered = sortRows(
     // Keep equal values deterministic when the list is refreshed.
     sortRows(
-      rows.filter(
-        (r) =>
-          (status === "all" || r.status === status) &&
-          (!kind || r.kind === kind),
-      ),
+      accountAndTypeRows.filter((r) => status === "all" || r.status === status),
       (r) => r.id,
       "desc",
       "number",
@@ -440,6 +457,7 @@ export function Transactions({
     selectAllRows.length > 0 &&
     selectAllRows.every((r) => selectedSet.has(r.id));
   const unavailable = busy || loading || data.company.id !== companyId;
+  const displayedTotals = summarizeTransactionAmounts(filtered);
   const reviewCount = selectedRows.filter((r) =>
     /REVIEW BEFORE POSTING/i.test(r.description || ""),
   ).length;
@@ -455,11 +473,32 @@ export function Transactions({
       .join(" · ");
   }, [selectedRows]);
   useEffect(() => {
+    setAccountIds([]);
+  }, [companyId, user.id, user.dataScope, period?.from, period?.to, allData]);
+  useEffect(() => {
+    const allowed = new Set(
+      availableAccountKey.split(",").filter(Boolean).map(Number),
+    );
+    setAccountIds((current) => {
+      const next = current.filter((id) => allowed.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [availableAccountKey]);
+  useEffect(() => {
     setSelected([]);
     setConfirming(false);
     setResult(null);
     setError("");
-  }, [query, status, kind, companyId, user.id, period?.from, period?.to]);
+  }, [
+    query,
+    status,
+    kind,
+    accountFilterKey,
+    companyId,
+    user.id,
+    period?.from,
+    period?.to,
+  ]);
   useEffect(() => {
     const allowed = new Set(
       eligibleKey ? eligibleKey.split(",").map(Number) : [],
@@ -515,7 +554,10 @@ export function Transactions({
                 : "All history"
               : label(s)}
             <span>
-              {rows.filter((r) => s === "all" || r.status === s).length}
+              {
+                accountAndTypeRows.filter((r) => s === "all" || r.status === s)
+                  .length
+              }
             </span>
           </button>
         ))}
@@ -560,6 +602,18 @@ export function Transactions({
               .filter(([key]) => !RETIRED_KINDS.has(key))
               .map(([value, label]) => ({ value, label })),
           ]}
+        />
+        <AccountFilter
+          accounts={data.accounts.map((account) => ({
+            id: account.id,
+            name: account.name,
+            code: account.code,
+            currency: account.currency,
+            active: account.active,
+          }))}
+          value={selectedAccountIds}
+          onChange={setAccountIds}
+          disabled={unavailable}
         />
         <details className="column-picker">
           <summary className="button secondary compact">
@@ -909,7 +963,7 @@ export function Transactions({
             <FileText size={25} />
           </div>
           <h3>
-            {query || kind
+            {query || kind || selectedAccountIds.length
               ? "No matching transactions"
               : status === "pending"
                 ? "No pending transactions"
@@ -920,14 +974,55 @@ export function Transactions({
                     : "No transactions yet"}
           </h3>
           <p>
-            {query || kind
-              ? "Try a different search or transaction type."
+            {query || kind || selectedAccountIds.length
+              ? "Try a different search, transaction type, or account filter."
               : period
                 ? "Choose another period to see its transactions and reversals."
                 : "Transactions will appear here as you record business activity."}
           </p>
         </div>
       )}
+      <div
+        className="transaction-totals"
+        aria-label="Total displayed transaction amounts"
+        aria-busy={loading}
+      >
+        <div className="transaction-totals-heading">
+          <strong>Total displayed transaction amounts</strong>
+          <span>
+            {loading
+              ? "Updating transactions…"
+              : `${displayedTotals.count} matching ${activityView ? "activity rows" : "transactions"}`}
+          </span>
+        </div>
+        {!loading && (
+          <div className="transaction-totals-values">
+            <div>
+              <span>Amounts by currency</span>
+              <strong>
+                {displayedTotals.byCurrency.length
+                  ? displayedTotals.byCurrency
+                      .map(
+                        (total) =>
+                          `${total.currency} ${formatTransactionAmount(total.amount)}`,
+                      )
+                      .join(" · ")
+                  : "—"}
+              </strong>
+            </div>
+            <div className="transaction-totals-base">
+              <span>Total amount in PKR</span>
+              <strong>
+                PKR {formatTransactionAmount(displayedTotals.baseAmount)}
+              </strong>
+            </div>
+          </div>
+        )}
+        <p>
+          Includes all displayed statuses. These are transaction amounts, not an
+          account balance.
+        </p>
+      </div>
       <div className="table-bottom">
         Showing {filtered.length}{" "}
         {activityView

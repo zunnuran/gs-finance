@@ -1232,6 +1232,168 @@ tr.clickable:hover {
   overflow: visible;
   min-width: 0;
 }
+.account-filter-trigger > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.account-filter-panel {
+  z-index: 220;
+  display: flex;
+  flex-direction: column;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 36px #43074426;
+}
+.account-filter-heading,
+.account-filter-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.account-filter-heading strong {
+  font-size: 12px;
+}
+.account-filter-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  margin-top: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.account-filter-search input {
+  min-width: 0;
+  min-height: 36px;
+  border: 0;
+  box-shadow: none;
+  padding: 7px 0;
+  font-size: 11px;
+}
+.account-filter-search:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+.account-filter-hint {
+  margin: 10px 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.account-filter-options {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+.account-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.account-filter-option:hover,
+.account-filter-option:focus-within {
+  background: var(--primary-soft);
+}
+.account-filter-option input[type="checkbox"] {
+  margin: 0;
+}
+.account-filter-option > span {
+  min-width: 0;
+}
+.account-filter-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.account-filter-name em {
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+  background: var(--surface-subtle);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.account-filter-option small {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.account-filter-empty {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 10px 7px;
+}
+.account-filter-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 10px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.transaction-totals {
+  border-top: 1px solid var(--border);
+  background: var(--surface-subtle);
+  padding: 17px 22px;
+}
+.transaction-totals-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 7px 15px;
+}
+.transaction-totals-heading strong {
+  font-size: 12px;
+  color: var(--text);
+}
+.transaction-totals-heading span,
+.transaction-totals-values > div > span {
+  font-size: 10px;
+  color: var(--muted);
+}
+.transaction-totals-values {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px 24px;
+  margin-top: 14px;
+}
+.transaction-totals-values > div {
+  display: grid;
+  gap: 6px;
+}
+.transaction-totals-values strong {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.transaction-totals-base strong {
+  color: var(--primary);
+}
+.transaction-totals p {
+  margin: 12px 0 0;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
 .column-picker {
   position: relative;
 }
