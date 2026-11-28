@@ -3479,7 +3479,7 @@ function TransactionModal({
             options={data.contacts.filter(
               (c) =>
                 c.active &&
-                (contactKind ? c.kind === contactKind : c.kind !== "employee"),
+                (!contactKind || c.kind === contactKind),
             )}
             onChange={(v) => set("contactId", v ? Number(v) : null)}
             placeholder={contactKind ? `Select ${contactKind}` : "No contact"}
